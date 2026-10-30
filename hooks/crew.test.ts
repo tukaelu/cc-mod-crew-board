@@ -144,6 +144,22 @@ test('step: a subagent reports on its own row only; the main session cannot', as
   expect(shown).toMatch(/░ ctx 0%/)
 })
 
+test('step: a working row lists the notes before the current one newest first; a done row oldest first', async ($, on) => {
+  engine(on)
+  await spawn($, 'Writer')
+  for (const [done, note] of [[1, 'outline'], [2, 'draft'], [3, 'polish']] as const) {
+    await $.tool.call({ tool: STEP, agentId: 'a1', done, total: 4, note } as never)
+  }
+  const working = await texts($)
+  expect(working).toContain('Step 4 · polish')
+  expect(working.indexOf('draft')).toBeLessThan(working.indexOf('outline'))
+  await end($, 'a1', 'answer')
+  const done = await texts($)
+  expect(done).toContain('Done · 4 steps')
+  expect(done.indexOf('draft')).toBeLessThan(done.indexOf('polish'))
+  expect(done).not.toContain('outline')
+})
+
 test('failure: a run that ends other than with an answer is finished with ✗ and toasts once', async ($, on) => {
   const { toasts } = engine(on)
   await spawn($, 'Fragile')

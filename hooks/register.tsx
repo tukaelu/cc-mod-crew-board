@@ -53,7 +53,7 @@ type Lang = 'en' | 'ja'
 
 const STRINGS = {
   en: {
-    pane: 'Crew',
+    pane: 'Crew Board',
     cost: 'Total chat cost',
     tokens: 'Subagent tokens',
     time: 'Time',
@@ -72,8 +72,8 @@ const STRINGS = {
     isFinished: 'finished',
     isFailed: 'failed',
     isPlanned: 'planned',
-    opened: 'Crew panel opened.',
-    closed: 'Crew panel closed.',
+    opened: 'Crew Board opened.',
+    closed: 'Crew Board closed.',
     done: 'Done',
     tasks: 'Tasks',
     busy: (n: number) => `${n} running`,
@@ -88,9 +88,9 @@ const STRINGS = {
     doneToast: (t: string) => `Plan complete: ${t}`,
   },
   ja: {
-    pane: 'クルー',
-    cost: 'チャット全体のコスト',
-    tokens: 'サブエージェントのトークン',
+    pane: 'Crew Board',
+    cost: 'コスト（全体）',
+    tokens: 'トークン（サブ）',
     time: '時間',
     collapse: '縮小',
     expand: '展開',
@@ -107,8 +107,8 @@ const STRINGS = {
     isFinished: '完了',
     isFailed: '失敗',
     isPlanned: '予定',
-    opened: 'クルーパネルを開きました。',
-    closed: 'クルーパネルを閉じました。',
+    opened: 'Crew Board を開きました。',
+    closed: 'Crew Board を閉じました。',
     done: '完了',
     tasks: 'タスク',
     busy: (n: number) => `${n} 件実行中`,
@@ -313,7 +313,7 @@ const barText = (f: Flow, width: number): string => {
 }
 
 // ---------------------------------------------------------------------------
-// Crew panel: every subagent of the session, plus the tasks the plan lists.
+// The Crew Board panel: every subagent of the session, plus the tasks the plan lists.
 
 // One color per subagent_type, from a hash of its name: the same type always
 // draws in the same color.
@@ -542,10 +542,11 @@ const stepLines = (a: AgentRun): { head: string; notes: string[] } | null => {
   const at = Math.min(a.stepTotal || Infinity, (a.stepDone ?? 0) + 1)
   if (a.status === 'failed') return { head: a.stepTotal ? s.failedAt(at) : s.failed, notes: notes.slice(-2) }
   if (!a.stepTotal) return null
-  // Done: the last notes. Working: the current one in the head, the two before it under it.
+  // Done: the last notes, oldest first. Working: the current one in the head, and
+  // under it the two before it, newest first.
   if (a.status === 'done') return { head: s.doneSteps(a.stepTotal), notes: notes.slice(-2) }
   const current = notes.at(-1)
-  return { head: `${s.stepAt(at)}${current ? ` · ${current}` : ''}`, notes: notes.slice(-3, -1) }
+  return { head: `${s.stepAt(at)}${current ? ` · ${current}` : ''}`, notes: notes.slice(-3, -1).reverse() }
 }
 
 // Card rows. The sprite draws three pixels per cell (66×48) in the card's left column.
@@ -554,26 +555,35 @@ const TEXT_X = 92
 const CARD_GAP = 8
 const LINE = 18
 
-const cardHeight = (a: AgentRun): number => {
+// The meta line (type · model) and the stats (ctx · tokens · time) share a line
+// when both fit; in a narrow pane the stats move to a line of their own.
+const metaOf = (a: AgentRun): string =>
+  `${a.taskNo ? `#${a.taskNo}  ` : ''}${[a.type, runModel(a), ...(a.round > 1 ? [`${tr().round} ${a.round}`] : [])].join(' · ')}`
+
+const statsOf = (a: AgentRun, at: number): string => `${fmtCtx(a)} · ${fmtTokens(a.tokens)} ${tr().tokensWord} · ${fmtTime(elapsed(a, at))}`
+
+const isStatsWrapped = (W: number, a: AgentRun, at: number): boolean =>
+  textWidth(metaOf(a), 11) + 12 + textWidth(statsOf(a, at), 11) > W - TEXT_X - PAD
+
+const cardHeight = (W: number, a: AgentRun, at: number): number => {
   const steps = stepLines(a)
-  return 62 + (steps ? 22 + steps.notes.length * LINE : 0) + PAD
+  return 62 + (isStatsWrapped(W, a, at) ? 16 : 0) + (steps ? 22 + steps.notes.length * LINE : 0) + PAD
 }
 
 const agentSvg = (W: number, a: AgentRun, at: number): string => {
-  const s = tr()
   const color = colorOf(a.type)
   const ctx = ctxOf(a)
-  const H = cardHeight(a)
+  const H = cardHeight(W, a, at)
   const textW = W - TEXT_X - PAD
-  const stats = `${fmtCtx(a)} · ${fmtTokens(a.tokens)} ${s.tokensWord} · ${fmtTime(elapsed(a, at))}`
-  const metaW = Math.max(40, textW - textWidth(stats, 11) - 12)
-  const meta = [a.type, runModel(a), ...(a.round > 1 ? [`${s.round} ${a.round}`] : [])].join(' · ')
+  const stats = statsOf(a, at)
+  const isWrapped = isStatsWrapped(W, a, at)
+  const meta = metaOf(a)
   const steps = stepLines(a)
   const progress = progressOf(a)
   // Without reported steps the bar falls back to the context, drawn grey.
   const fillW = Math.round(textW * (progress ?? ctx.percent / 100))
   const stepColor = STEP_COLOR[a.status]
-  let y = 68
+  let y = isWrapped ? 84 : 68
   const stepSvg = steps
     ? `<path d="M${TEXT_X + 5} ${y - 9}a5 5 0 1 0 0.01 0z" fill="none" stroke="${stepColor}" stroke-width="1.4"/><path d="M${TEXT_X + 5} ${y - 9}a5 5 0 0 0 0 10z" fill="${stepColor}"/>
 <text x="${TEXT_X + 16}" y="${y}" fill="${stepColor}" font-family="${FONT}" font-size="12.5" font-weight="600">${xml(fitText(steps.head, 12.5, textW - 16))}</text>
@@ -587,8 +597,8 @@ ${steps.notes.map(n => `<text class="t" x="${TEXT_X + 16}" y="${(y += LINE)}" fo
 ${mascot(13, (H - 48) / 2, 3, a.type, stateOf(a.status), a.status === 'running', a.effort)}
 <text class="t" x="${TEXT_X}" y="26" font-family="${FONT}" font-size="14" font-weight="600">${xml(fitText(a.description || a.type, 14, textW - 20))}</text>
 ${statusMark(W - PAD - 6, 21, a.status, color)}
-<text class="s" x="${TEXT_X}" y="45" font-family="${FONT}" font-size="11">${a.taskNo ? `#${a.taskNo}  ` : ''}${xml(fitText(meta, 11, metaW - (a.taskNo ? 22 : 0)))}</text>
-<text class="s" x="${W - PAD}" y="45" text-anchor="end" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(stats)}</text>
+<text class="s" x="${TEXT_X}" y="45" font-family="${FONT}" font-size="11">${xml(fitText(meta, 11, isWrapped ? textW : textW - textWidth(stats, 11) - 12))}</text>
+${isWrapped ? `<text class="s" x="${TEXT_X}" y="61" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(fitText(stats, 11, textW))}</text>` : `<text class="s" x="${W - PAD}" y="45" text-anchor="end" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(stats)}</text>`}
 ${stepSvg}
 <rect class="k" x="${TEXT_X}" y="${barY}" width="${textW}" height="3" rx="1.5"/><rect${progress === null ? ' class="m"' : ''} x="${TEXT_X}" y="${barY}" width="${fillW}" height="3" rx="1.5"${progress === null ? '' : ` fill="${color}"`}/>`,
   )
@@ -638,7 +648,16 @@ const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: Totals):
 
 // Section heads on the desktop: a colored bar per section.
 const SECTION_COLOR = { running: '#1F9D55', finished: '#E0A419', planned: '#9A9A96' }
-const SECTION_H = 30
+const SECTION_H = 36
+
+const sectionSvg = (W: number, color: string, label: string): string =>
+  svg(
+    W,
+    SECTION_H,
+    `<rect width="${W}" height="28" rx="6" fill="${color}"/>
+<text x="12" y="19" fill="#ffffff" font-family="${FONT}" font-size="13" font-weight="600">${xml(fitText(label, 13, W - 24))}</text>`,
+    false,
+  )
 
 // --- terminal drawing: the same rows in text.
 
@@ -1022,7 +1041,7 @@ export const register: Register = (on, options) => {
     // The chat's own total, from the engine's ledger; absent where the host keeps none.
     const chatUsd = (await $.session.usage().catch(() => null))?.cost?.usd
     const t: Totals = { ...totals(list, at), chatUsd }
-    // The pane's title says "Crew"; inside, the plan's own name, else the count.
+    // The pane's title says "Crew Board"; inside, the plan's own name, else the count.
     const title = f && !f.isFinished ? f.title : s.subagents(list.length)
 
     const toggleCompact = (
@@ -1046,31 +1065,25 @@ export const register: Register = (on, options) => {
 
     if (e.surface === 'desktop' && 'Svg' in ui) {
       const { Svg } = ui
+      // The pane reports columns, not pixels, so W is an estimate; the column is
+      // centered so whatever it misses splits evenly on both sides.
       const W = Math.max(240, Math.min(900, (e.props.bodyColumns || 40) * 8 - 8))
-      const section = (key: string, color: string, label: JSX.Element | string) => (
-        <Box key={key} backgroundColor={color} paddingX={1} marginBottom={1}>
-          {typeof label === 'string' ? (
-            <Text color="#ffffff" bold>
-              {label}
-            </Text>
-          ) : (
-            label
-          )}
-        </Box>
+      const section = (key: string, color: string, label: string) => (
+        <Svg key={key} source={sectionSvg(W, color, label)} alt={label} width={W} height={SECTION_H} />
       )
-      const doneHead = (
-        <Button key="done" plain onPress={() => update($, panel, prev => ({ ...prev, isDoneCollapsed: !prev.isDoneCollapsed }))}>
-          <Text color="#ffffff" bold>
-            {`${p.isDoneCollapsed ? '▸' : '▾'} ${s.finished} · ${finished.length}`}
-          </Text>
-        </Button>
+      // The pane's own controls: compact view, and folding the finished runs away.
+      const controls = (
+        <Box flexDirection="row" gap={2}>
+          {toggleCompact}
+          {finished.length > 0 && !p.isCompact && toggleDone}
+        </Box>
       )
 
       if (p.isCompact) {
         return (
-          <Box flexDirection="column" gap={1}>
+          <Box flexDirection="column" gap={1} alignItems="center">
             <Svg source={compactSvg(W, list, planned, t)} alt={`${list.length} ${s.agentsCount}, ${summary}`} width={W} height={32} />
-            {toggleCompact}
+            {controls}
           </Box>
         )
       }
@@ -1081,31 +1094,31 @@ export const register: Register = (on, options) => {
         LINE_H +
         (isEmpty ? LINE_H : 0) +
         sections * SECTION_H +
-        [...running, ...shownDone].reduce((h, a) => h + cardHeight(a) + CARD_GAP, 0) +
+        [...running, ...shownDone].reduce((h, a) => h + cardHeight(W, a, at) + CARD_GAP, 0) +
         planned.length * (PLANNED_H + CARD_GAP)
       return (
-        <Box flexDirection="column">
+        <Box flexDirection="column" alignItems="center">
           {/* The grid sizes the pane; the content is placed over it, as an
               absolute Box paints over the siblings before it. */}
           {gridTiles(gridH).map((tileH, i) => (
             <Svg key={`grid-${i}`} source={gridSvg(W, tileH)} alt="dotted grid" width={W} height={tileH} />
           ))}
-          <Box flexDirection="column" position="absolute" top={0} left={0} right={0}>
+          <Box flexDirection="column" position="absolute" top={0} left={0} right={0} alignItems="center">
             <Svg source={headerSvg(W, title, t)} alt={`${title}: ${summary}`} width={W} height={HEADER_H} />
-            {toggleCompact}
+            {controls}
             {isEmpty && <Text dimColor>{s.empty}</Text>}
             {running.length > 0 && section('h-run', SECTION_COLOR.running, `▾ ${s.running} · ${running.length}`)}
             {running.map(a => (
-              <Svg key={a.id} source={agentSvg(W, a, at)} alt={runAlt(a, s.isRunning)} width={W} height={cardHeight(a) + CARD_GAP} />
+              <Svg key={a.id} source={agentSvg(W, a, at)} alt={runAlt(a, s.isRunning)} width={W} height={cardHeight(W, a, at) + CARD_GAP} />
             ))}
-            {finished.length > 0 && section('h-done', SECTION_COLOR.finished, doneHead)}
+            {finished.length > 0 && section('h-done', SECTION_COLOR.finished, `${p.isDoneCollapsed ? '▸' : '▾'} ${s.finished} · ${finished.length}`)}
             {shownDone.map(a => (
               <Svg
                 key={a.id}
                 source={agentSvg(W, a, at)}
                 alt={runAlt(a, a.status === 'failed' ? s.isFailed : s.isFinished)}
                 width={W}
-                height={cardHeight(a) + CARD_GAP}
+                height={cardHeight(W, a, at) + CARD_GAP}
               />
             ))}
             {planned.length > 0 && section('h-plan', SECTION_COLOR.planned, `${s.planned} · ${planned.length}`)}
