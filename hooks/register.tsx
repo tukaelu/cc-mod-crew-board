@@ -290,7 +290,7 @@ const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
 <text x="${pillX + pillW / 2}" y="${BAR_H / 2 + 4}" text-anchor="middle" font-family="${FONT}" font-size="11" font-weight="600" fill="#ffffff">${xml(text)}</text>
 </g>
 <text class="m" x="${W - MASCOT_W - 6}" y="${H / 2 + 4.5}" text-anchor="end" font-family="${FONT}" font-size="12.5" font-variant-numeric="tabular-nums">${percent}</text>
-${MASCOT_CSS}${mascot(W - MASCOT_W, (H - 16) / 2, 1, '', f.isFinished ? 'done' : 'run', !f.isFinished && isWorking)}
+${MASCOT_CSS}<g transform="translate(${W - MASCOT_W},${(H - 16) / 2})" shape-rendering="crispEdges">${mendako('none', f.isFinished ? 'done' : 'run', color, undefined, !f.isFinished && isWorking)}</g>
 </svg>`
 }
 
@@ -514,10 +514,10 @@ const PANE_CSS = `<style>
 @media (prefers-reduced-motion: reduce){.live{animation:none}}
 </style>`
 
-// The mendako on its 22×16 grid, `scale` pixels a cell, at (x, y). The band's has no
-// type: no costume, and the belly band in the bar's own color.
+// The mendako on its 22×16 grid, `scale` pixels a cell, at (x, y), in its type's
+// costume and color. The band draws its own: no costume, the bar's color.
 const mascot = (x: number, y: number, scale: number, type: string, state: MascotState, isMoving = state === 'run', effort?: string): string =>
-  `<g transform="translate(${x},${y}) scale(${scale})" shape-rendering="crispEdges">${mendako(type ? costumeOf(type) : 'none', state, type ? colorOf(type) : ACCENT, effort, isMoving)}</g>`
+  `<g transform="translate(${x},${y}) scale(${scale})" shape-rendering="crispEdges">${mendako(costumeOf(type), state, colorOf(type), effort, isMoving)}</g>`
 
 const stateOf = (status: AgentRun['status']): MascotState => (status === 'running' ? 'run' : status === 'done' ? 'done' : 'fail')
 
