@@ -51,7 +51,6 @@ const PRICED: readonly (readonly [model: string, shown: string])[] = [
   ['claude-sonnet-5-5', '$16.2'], // 2 + 10 + 2 × 0.10 + 4
   ['claude-sonnet-5', '$16.4'], // 2 + 10 + 2 × 0.20 + 4
   ['claude-sonnet-4-6', '$24.6'], // 3 + 15 + 2 × 0.30 + 6
-  ['claude-haiku-5-5', '$0.82'], // 0.10 + 0.50 + 2 × 0.01 + 0.20
   ['claude-haiku-4-5', '$8.20'], // 1 + 5 + 2 × 0.10 + 2
   // A bracketed variant and a date snapshot are the same version.
   ['claude-opus-5-5[1m]', '$32.4'],
@@ -76,6 +75,21 @@ for (const model of ['claude-opus-4-9', 'claude-opus', 'claude-sonnet-5-6', 'gpt
     expect(await shows($, /^≈\$0\.00\+/)).toBeDefined()
   })
 }
+
+// A turn's sum hides each request's prompt length, which Haiku 5.5's price depends on.
+test('cost: Haiku 5.5 known only from the turn\'s sum shows —, not a guess at the short-prompt price', async ($, on) => {
+  await worker($, on, 'claude-haiku-5-5')
+  await complete($, 'claude-haiku-5-5', TURN)
+  expect(await shows($, /\s— \d+:\d\d/)).toBeDefined()
+})
+
+test('cost: Haiku 5.5 seen request by request is priced', async ($, on) => {
+  // One request of 10K input and 10K output: (10K × 0.10 + 10K × 0.50) / 1M = 0.006
+  await worker($, on, 'claude-haiku-5-5', { input_tokens: 10_000, output_tokens: 10_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 })
+  await step($, 'claude-haiku-5-5')
+  await complete($, 'claude-haiku-5-5', TURN)
+  expect(await shows($, /≈\$0\.01 /)).toBeDefined()
+})
 
 // Haiku 5.5 is priced by prompt length, per request: 120K of prompt is over the 100K line.
 const LONG: Usage = { input_tokens: 20_000, output_tokens: 10_000, cache_read_input_tokens: 50_000, cache_creation_input_tokens: 50_000 }

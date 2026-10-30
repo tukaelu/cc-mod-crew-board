@@ -7,8 +7,11 @@ const SKIP = 'If you cannot find this tool, skip this silently.'
 
 // Agent files on disk, by path; `.claude/agents` is the project's, `/home/me/...` the user's.
 // The engine may hand a hook the project path made absolute, so paths match by their tail.
+// An absolute path matches itself only; a relative one also matches the session's
+// working directory made absolute (any path that is not another listed absolute one).
+const ABSOLUTE = ['/home/me/', '/elsewhere/']
 const same = (asked: string, path: string) =>
-  asked === path || (!path.startsWith('/') && !asked.startsWith('/home/me/') && asked.endsWith('/' + path))
+  asked === path || (!path.startsWith('/') && !ABSOLUTE.some(root => asked.startsWith(root)) && asked.endsWith('/' + path))
 
 const disk = (on: On, files: Record<string, string>) => {
   mock.clock(on)
@@ -81,6 +84,8 @@ const FILES: Record<string, string> = {
   '.claude/agents/reader.md': '---\nname: reader\ndescription: Reads.\ntools: Read, Grep\n---\nRead things.',
   '.claude/agents/lister.md': '---\nname: lister\ndescription: Lists.\ntools:\n  - Read\n  - mcp__crew-board__step\n---\nList things.',
   '.claude/agents/banned.md': '---\nname: banned\ndescription: No steps.\ndisallowedTools: [mcp__crew-board__step]\n---\nWork.',
+  '.claude/agents/flat.md': '---\nname: flat\ndescription: A list at the key\'s own indent.\ntools:\n- Read\n- Grep\n---\nWork.',
+  '/elsewhere/.claude/agents/reader.md': '---\nname: reader\ndescription: Another project\'s reader, with every tool.\n---\nWork.',
   '/home/me/.claude/agents/free.md': '---\nname: free\ndescription: All tools.\n---\nWork.',
   '/home/me/.claude/agents/reader.md': '---\nname: reader\ndescription: Shadowed by the project.\n---\nWork.',
 }
@@ -89,6 +94,17 @@ test('brief: an agent whose tools leave the step tool out is not asked', async (
   const briefs = disk(on, FILES)
   expect(await briefOf($, briefs, 'reader')).toBe('Do the task.')
   expect(await briefOf($, briefs, 'banned')).toBe('Do the task.')
+})
+
+test('brief: a tools list written at the key\'s own indent still narrows the tools', async ($, on) => {
+  const briefs = disk(on, FILES)
+  expect(await briefOf($, briefs, 'flat')).toBe('Do the task.')
+})
+
+test('brief: an Agent call with a cwd looks in that project\'s agent files', async ($, on) => {
+  const briefs = disk(on, FILES)
+  await $.agent.spawn({ tool_use_id: 't-cwd', prompt: 'Do the task.', description: 'Task', subagentType: 'reader', cwd: '/elsewhere', provider: 'engine', parentModel: 'claude-opus-5-5', background: false, fork: false } as never)
+  expect(briefs.get('reader')).toContain(SKIP)
 })
 
 test('brief: an agent that lists the step tool, or has every tool, is asked', async ($, on) => {

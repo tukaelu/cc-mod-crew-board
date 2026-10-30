@@ -92,6 +92,28 @@ test('link: without a number the description is matched to a task title', async 
   expect(shown).not.toMatch(/1\. Write the parser/)
 })
 
+test('link: a number the plan does not have falls back to the title', async ($, on) => {
+  engine(on)
+  await $.tool.call(PLAN as never)
+  await spawn($, '#9 Write the parser')
+  const shown = await texts($)
+  expect(shown).toMatch(/#1 · general-purpose/)
+  expect(shown).not.toContain('#9')
+  expect(shown).not.toMatch(/1\. Write the parser/)
+})
+
+test('link: after a re-plan, runs follow their tasks to the new numbers', async ($, on) => {
+  engine(on)
+  await $.tool.call(PLAN as never)
+  await spawn($, '#2 Hook up the command line')
+  // Same plan, tasks reordered: "Wire the CLI" is now task 1.
+  await $.tool.call({ ...PLAN, tasks: [PLAN.tasks[1], PLAN.tasks[0], PLAN.tasks[2]] } as never)
+  const shown = await texts($)
+  expect(shown).toMatch(/#1 · general-purpose/)
+  expect(shown).toMatch(/2\. Write the parser/)
+  expect(shown).not.toMatch(/1\. Wire the CLI/)
+})
+
 test('link: the same task run again is round 2, by number or by title', async ($, on) => {
   engine(on)
   await $.tool.call(PLAN as never)
@@ -139,6 +161,15 @@ test('notify: the context warning shows once per agent, past contextWarnPercent'
   await request($, next, 'a1', 700_000)
   await request($, next, 'a2', 900_000)
   expect(toasts).toEqual(['Big: ctx 60%', 'Bigger: ctx 90%'])
+})
+
+test('notify: a contextWarnPercent of 0 is not a threshold; the default 80% stands', { options: { contextWarnPercent: 0 } }, async ($, on) => {
+  const { toasts, next } = engine(on)
+  await spawn($, 'Big')
+  await request($, next, 'a1', 500_000)
+  expect(toasts).toEqual([])
+  await request($, next, 'a1', 810_000)
+  expect(toasts).toEqual(['Big: ctx 81%'])
 })
 
 test('notify: a model missing from the window table is warned on the 1M guess', async ($, on) => {

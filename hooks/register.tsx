@@ -184,6 +184,11 @@ const label = (f: Flow): string => {
   return `${f.phase || s.tasks} ${f.done}/${f.total}`
 }
 
+// Launched tasks: Agent calls still in flight (before their run shows up) or runs
+// still working. A background Agent call returns as soon as its subagent starts,
+// so the runs carry the count from there.
+const withLive = (f: Flow, list: AgentRun[]): Flow => ({ ...f, running: Math.max(f.running, list.filter(a => a.status === 'running').length) })
+
 const ratio = (f: Flow): number => (f.isFinished ? 1 : f.total ? f.done / f.total : 0)
 
 // Deterministic noise so the dither does not shimmer between redraws.
@@ -398,8 +403,11 @@ const priceOf = (model: string, prompt: number): Price | null => {
 }
 
 // `isRequest` says the usage is one model request, which is what a prompt-length price
-// is set by; a turn's sum is priced at the model's ordinary prices. null: not priced.
+// is set by. null: not priced.
 const costOf = (model: string, u: Usage, isRequest: boolean): number | null => {
+  // A turn's sum hides how long each request's prompt was, so a model priced by
+  // prompt length cannot be priced from it.
+  if (!isRequest && modelKey(model) === 'claude-haiku-5-5') return null
   const prompt = isRequest ? (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) : 0
   const price = priceOf(model, prompt)
   if (!price) return null
@@ -463,12 +471,20 @@ const TASK_NO = /^#(\d+)\s+/
 const linkTask = (f: Flow | null, description: string): { description: string; taskNo?: number } => {
   const tasks = f && !f.isFinished ? f.tasks : []
   const m = TASK_NO.exec(description)
-  if (m) {
-    const n = Number(m[1])
-    return { description: description.slice(m[0].length), taskNo: n >= 1 && n <= tasks.length ? n : undefined }
-  }
-  const i = tasks.findIndex(t => norm(t.title) === norm(description))
-  return { description, taskNo: i >= 0 ? i + 1 : undefined }
+  const title = m ? description.slice(m[0].length) : description
+  const n = m ? Number(m[1]) : 0
+  if (n >= 1 && n <= tasks.length) return { description: title, taskNo: n }
+  // No number, or one the plan does not have: the title decides.
+  const i = tasks.findIndex(t => norm(t.title) === norm(title))
+  return { description: title, taskNo: i >= 0 ? i + 1 : undefined }
+}
+
+// After a re-plan, a run keeps its task by the task's title, else by its own
+// description; a task no longer in the plan leaves it unlinked.
+const relink = (a: AgentRun, before: PlannedTask[], after: PlannedTask[]): AgentRun => {
+  const key = norm((a.taskNo !== undefined ? before[a.taskNo - 1]?.title : undefined) ?? a.description)
+  const i = after.findIndex(t => norm(t.title) === key)
+  return { ...a, taskNo: i >= 0 ? i + 1 : undefined }
 }
 
 // The same task run again: by its number, or by its description when it has none.
@@ -532,8 +548,9 @@ const statusMark = (x: number, y: number, status: string, color: string): string
   return `<circle cx="${x}" cy="${y}" r="5" fill="none" stroke="#9a9a96" stroke-width="1.4"/><path d="M${x} ${y - 2.5}v2.8l1.8 1.2" fill="none" stroke="#9a9a96" stroke-width="1.4" stroke-linecap="round"/>`
 }
 
-const svg = (W: number, H: number, body: string): string =>
-  `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${PANE_CSS}${MASCOT_CSS}${body}</svg>`
+// Each Svg is a document of its own, so a drawing with a mendako carries its CSS.
+const svg = (W: number, H: number, body: string, hasMascot = true): string =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${PANE_CSS}${hasMascot ? MASCOT_CSS : ''}${body}</svg>`
 
 // The pane's own title already says "Crew": the header names the plan, if any.
 const headerSvg = (W: number, title: string, t: Totals): string => {
@@ -550,6 +567,7 @@ const headerSvg = (W: number, title: string, t: Totals): string => {
     headerHeight(title),
     `${title ? `<text class="t" x="0" y="15" font-family="${FONT}" font-size="14" font-weight="600">${xml(fitText(title, 14, W))}</text>` : ''}
 ${tile(0, s.cost, fmtTotal(t))}${tile(1, s.tokens, fmtTokens(t.tokens))}${tile(2, s.time, fmtTime(t.time))}`,
+    false,
   )
 }
 
@@ -694,7 +712,7 @@ const parseFrontmatter = (text: string): Frontmatter | null => {
   const out: Frontmatter = {}
   let key = ''
   for (const line of (m[1] ?? '').split(/\r?\n/)) {
-    const item = /^\s+-\s*(.+)$/.exec(line)
+    const item = /^\s*-\s*(.+)$/.exec(line)
     if (item && (key === 'tools' || key === 'disallowedTools')) {
       ;(out[key] ??= []).push(unquote(item[1] ?? ''))
       continue
@@ -719,25 +737,24 @@ const unquote = (s: string): string => s.trim().replace(/^["']|["']$/g, '')
 
 // Where Claude Code looks for agent files, the project's first: the
 // definition there wins over the user's of the same name.
-async function agentFile($: EngineInterface, type: string): Promise<Frontmatter | null> {
+// The project is the spawn's own directory when the Agent call names one.
+async function agentFile($: EngineInterface, type: string, cwd: string | undefined): Promise<Frontmatter | null> {
   const home = await $.env.get('HOME').catch(() => undefined)
-  for (const dir of ['.claude/agents', ...(home ? [`${home}/.claude/agents`] : [])]) {
-    let entries: { name: string }[] = []
-    try {
-      entries = await $.fs.list(dir)
-    } catch {
-      continue
-    }
-    for (const entry of entries.filter(x => x.name.endsWith('.md'))) {
-      try {
-        const fm = parseFrontmatter(await $.fs.read(`${dir}/${entry.name}`))
-        if (fm?.name === type) return fm
-      } catch {
-        // An unreadable file names no agent we can check.
-      }
-    }
-  }
-  return null
+  const dirs = [cwd ? `${cwd}/.claude/agents` : '.claude/agents', ...(home ? [`${home}/.claude/agents`] : [])]
+  // Every file is read at once; the first directory's match still wins.
+  const found = await Promise.all(
+    dirs.map(async dir => {
+      const entries = await $.fs.list(dir).catch(() => [])
+      const files = await Promise.all(
+        entries
+          .filter(x => x.name.endsWith('.md'))
+          // An unreadable file names no agent we can check.
+          .map(x => $.fs.read(`${dir}/${x.name}`).then(parseFrontmatter, () => null)),
+      )
+      return files.find(fm => fm?.name === type) ?? null
+    }),
+  )
+  return found.find(fm => fm !== null) ?? null
 }
 
 const namesStep = (tool: string): boolean => tool === STEP_TOOL || tool === 'mcp__crew-board' || tool === 'mcp__crew-board__*'
@@ -753,11 +770,11 @@ const fileAllowsStep = (fm: Frontmatter): boolean => {
 // Built-in and the person's own agent types (no ":") are asked; a plugin's
 // (`plugin:agent`, a name an agent file cannot have) are someone else's and left
 // alone, unless `stepInclude` names them. `stepExclude` stops any type.
-async function shouldBrief($: EngineInterface, type: string, prompt: string, options: Record<string, unknown>): Promise<boolean> {
+async function shouldBrief($: EngineInterface, type: string, prompt: string, cwd: string | undefined, options: Record<string, unknown>): Promise<boolean> {
   if (prompt.includes(STEP_TOOL)) return false
   if (typeList(options.stepExclude ?? 'Explore').includes(type)) return false
   if (type.includes(':') && !typeList(options.stepInclude).includes(type)) return false
-  const fm = await agentFile($, type)
+  const fm = await agentFile($, type, cwd)
   return !fm || fileAllowsStep(fm)
 }
 
@@ -769,7 +786,10 @@ async function autoOpen($: EngineInterface, key: string): Promise<void> {
 }
 
 export const register: Register = (on, options) => {
-  const warnPercent = Number.isFinite(Number(options.contextWarnPercent)) ? Number(options.contextWarnPercent) : 80
+  // An empty field reads as unset, not as 0%: the default stands.
+  const warnRaw = options.contextWarnPercent
+  const warnValue = typeof warnRaw === 'number' ? warnRaw : typeof warnRaw === 'string' && warnRaw.trim() ? Number(warnRaw) : NaN
+  const warnPercent = Number.isFinite(warnValue) && warnValue > 0 ? warnValue : 80
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     lang = await detectLang($, options.language)
@@ -864,9 +884,14 @@ export const register: Register = (on, options) => {
       await update($, agents, list => list.filter(a => a.status === 'running'))
     }
     const next = await update($, flow, p => merge(p, input))
+    // Task numbers moved: the runs follow their tasks to the new numbers.
+    if (next && next.tasks !== prev?.tasks) {
+      const before = prev?.tasks ?? []
+      await update($, agents, list => list.map(a => relink(a, before, next.tasks)))
+    }
     if (next && input.tasks?.length) await autoOpen($, next.title)
     if (next?.isFinished && !prev?.isFinished) void $.ui.toast(tr().doneToast(next.title))
-    return { result: `ok: ${label(next ?? blank())}` }
+    return { result: `ok: ${label(withLive(next ?? blank(), await read($, agents)))}` }
   })
 
   // A subagent's own progress: the call runs in its loop, so agentId names it.
@@ -904,7 +929,7 @@ export const register: Register = (on, options) => {
 
   on('agent.spawn', async ($, e, next) => {
     // A resumed run or a workflow agent keeps the prompt it has.
-    const isBriefed = !e.resume && !e.workflow && (await shouldBrief($, e.subagentType, e.prompt, options))
+    const isBriefed = !e.resume && !e.workflow && (await shouldBrief($, e.subagentType, e.prompt, e.cwd, options))
     const started = await next(isBriefed ? { ...e, prompt: e.prompt + STEP_BRIEF } : e)
     if (started.deny !== undefined) return started
 
@@ -1206,6 +1231,7 @@ export const register: Register = (on, options) => {
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
     const list = await read($, agents)
+    const live = withLive(f, list)
     const crew = list.length + plannedOf(f, list).length
     const isWorking = list.some(a => a.status === 'running')
     const crewButton = <Button key="crew-agents" label={`×${crew}`} plain onPress={() => void togglePane($)} />
@@ -1221,7 +1247,7 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="column">
           <Box flexDirection="row" alignItems="center" gap={1}>
-            <Svg source={rowSvg(f, width, isWorking)} alt={`${f.title}: ${label(f)}, ${percent}`} width={width} height={H} />
+            <Svg source={rowSvg(live, width, isWorking)} alt={`${f.title}: ${label(live)}, ${percent}`} width={width} height={H} />
             {crewButton}
             {dismiss}
           </Box>
@@ -1240,8 +1266,8 @@ export const register: Register = (on, options) => {
             <Text color={f.isFinished ? DONE : ACCENT}>● </Text>
             <Text wrap="truncate-end">{f.title}</Text>
           </Box>
-          <Text color={f.isFinished ? DONE : ACCENT}>{barText(f, width)}</Text>
-          <Text bold>{label(f)}</Text>
+          <Text color={f.isFinished ? DONE : ACCENT}>{barText(live, width)}</Text>
+          <Text bold>{label(live)}</Text>
           <Text dimColor>{percent}</Text>
           <Text color="#E8836A">▣</Text>
           {crewButton}

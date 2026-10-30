@@ -136,6 +136,26 @@ test('band: nothing is drawn while Claude Code shows a survey', async ($, on) =>
   expect(await bandRow($)).not.toBeNull()
 })
 
+test('band: a background agent counts as launched after its Agent call returns', async ($, on) => {
+  const { release } = engine(on)
+  release() // Agent calls return at once, as a background launch does
+  await $.tool.call({ tool: PROGRESS, title: 'Ship it', total: 4, done: 1 } as never)
+  await $.tool.call({ tool: 'Agent', subagent_type: 'general-purpose', description: 'x', prompt: 'p' } as never)
+  await spawn($, 'Background', 'claude-opus-5-5')
+  const faint = /opacity="0\.45">(.*?)<\/g>/.exec((await bandRow($)) ?? '')?.[1] ?? ''
+  expect(faint).toContain('<rect')
+  await ($.turn.complete as (e: unknown) => Promise<unknown>)({ agentId: 'a1', reason: 'answer', answer: 'ok', usage: null })
+  expect(/opacity="0\.45">(.*?)<\/g>/.exec((await bandRow($)) ?? '')?.[1]).toBe('')
+})
+
+test('band: with no plan reported, a background agent shows "1 running"', async ($, on) => {
+  const { release } = engine(on)
+  release()
+  await $.tool.call({ tool: 'Agent', subagent_type: 'Explore', description: 'x', prompt: 'p' } as never)
+  await spawn($, 'Scout', 'claude-opus-5-5')
+  expect(await bandRow($)).toContain('1 running')
+})
+
 test('band: with no plan reported, a launched agent shows "N running"', async ($, on) => {
   const { release, clock } = engine(on)
   expect(await bandRow($)).toBeNull()
