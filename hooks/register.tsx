@@ -2,6 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { AgentRun, Flow, Panel, PlannedTask } from '../types'
+import { MASCOT_CSS, costumeOf, mendako } from './mendako'
+import type { MascotState } from './mendako'
 
 const flow = atom({ plugin: 'crew-board', key: 'flow' } as const, null)
 const agents = atom({ plugin: 'crew-board', key: 'agents' } as const, [])
@@ -288,7 +290,7 @@ const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
 <text x="${pillX + pillW / 2}" y="${BAR_H / 2 + 4}" text-anchor="middle" font-family="${FONT}" font-size="11" font-weight="600" fill="#ffffff">${xml(text)}</text>
 </g>
 <text class="m" x="${W - MASCOT_W - 6}" y="${H / 2 + 4.5}" text-anchor="end" font-family="${FONT}" font-size="12.5" font-variant-numeric="tabular-nums">${percent}</text>
-${mascot(W - MASCOT_W, (H - 16) / 2, 1, '', f.isFinished ? 'done' : 'run', isWorking)}
+${MASCOT_CSS}${mascot(W - MASCOT_W, (H - 16) / 2, 1, '', f.isFinished ? 'done' : 'run', !f.isFinished && isWorking)}
 </svg>`
 }
 
@@ -512,12 +514,10 @@ const PANE_CSS = `<style>
 @media (prefers-reduced-motion: reduce){.live{animation:none}}
 </style>`
 
-type MascotState = 'run' | 'done' | 'fail' | 'wait'
-
-// Placeholder until the mendako lands: the sprite's 22×16 box in the type's color.
-const MASCOT_CSS = ''
-const mascot = (x: number, y: number, scale: number, type: string, state: MascotState, _isMoving = state === 'run', _effort?: string): string =>
-  `<g transform="translate(${x},${y}) scale(${scale})" opacity="${state === 'wait' ? 0.5 : 1}"><rect width="22" height="16" rx="3" fill="${colorOf(type)}"/></g>`
+// The mendako on its 22×16 grid, `scale` pixels a cell, at (x, y). The band's has no
+// type: no costume, and the belly band in the bar's own color.
+const mascot = (x: number, y: number, scale: number, type: string, state: MascotState, isMoving = state === 'run', effort?: string): string =>
+  `<g transform="translate(${x},${y}) scale(${scale})" shape-rendering="crispEdges">${mendako(type ? costumeOf(type) : 'none', state, type ? colorOf(type) : ACCENT, effort, isMoving)}</g>`
 
 const stateOf = (status: AgentRun['status']): MascotState => (status === 'running' ? 'run' : status === 'done' ? 'done' : 'fail')
 
