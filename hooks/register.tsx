@@ -76,6 +76,9 @@ const STRINGS = {
     ctx: 'ctx',
     unpriced: 'excluding models missing from the price table',
     guessedWindow: 'window unknown, computed against 1M tokens',
+    failedToast: (d: string) => `Subagent failed: ${d}`,
+    ctxToast: (d: string, ctx: string) => `${d}: ${ctx}`,
+    doneToast: (t: string) => `Plan complete: ${t}`,
   },
   ja: {
     pane: 'クルー',
@@ -105,6 +108,9 @@ const STRINGS = {
     ctx: 'ctx',
     unpriced: '価格表にないモデルを除く',
     guessedWindow: 'ウィンドウ不明のため 100 万トークンで計算',
+    failedToast: (d: string) => `サブエージェントが失敗しました: ${d}`,
+    ctxToast: (d: string, ctx: string) => `${d}: ${ctx}`,
+    doneToast: (t: string) => `計画が完了しました: ${t}`,
   },
 } as const
 
@@ -444,9 +450,28 @@ type Planned = PlannedTask & { n: number }
 
 const plannedOf = (f: Flow | null, list: AgentRun[]): Planned[] => {
   if (!f || f.isFinished) return []
-  const started = new Set(list.map(a => norm(a.description)))
-  return (f.tasks ?? []).map((t, i) => ({ ...t, n: i + 1 })).filter(t => !started.has(norm(t.title)))
+  const started = new Set(list.map(a => a.taskNo))
+  return (f.tasks ?? []).map((t, i) => ({ ...t, n: i + 1 })).filter(t => !started.has(t.n))
 }
+
+// `#N ` at the start of an Agent description names the plan's task N; without it the
+// description is matched against the task titles. The number is taken off the title.
+const TASK_NO = /^#(\d+)\s+/
+
+const linkTask = (f: Flow | null, description: string): { description: string; taskNo?: number } => {
+  const tasks = f && !f.isFinished ? f.tasks : []
+  const m = TASK_NO.exec(description)
+  if (m) {
+    const n = Number(m[1])
+    return { description: description.slice(m[0].length), taskNo: n >= 1 && n <= tasks.length ? n : undefined }
+  }
+  const i = tasks.findIndex(t => norm(t.title) === norm(description))
+  return { description, taskNo: i >= 0 ? i + 1 : undefined }
+}
+
+// The same task run again: by its number, or by its description when it has none.
+const isSameTask = (a: AgentRun, taskNo: number | undefined, description: string): boolean =>
+  taskNo !== undefined ? a.taskNo === taskNo : !!description && a.taskNo === undefined && norm(a.description) === norm(description)
 
 // Subagents only: the main session's own spend is not counted. The cost sums
 // what could be priced; `isPartial` says some run could not, so it is a floor.
@@ -551,7 +576,7 @@ const fmtCtx = (a: AgentRun): string => {
 // What the alt text adds for the figures a sighted reader sees marked `+` or `?`.
 const runAlt = (a: AgentRun, state: string): string => {
   const s = tr()
-  const notes = [`${a.description || a.type}: ${runModel(a)}, ${state}`, fmtCtx(a), fmtCost(a.costUsd)]
+  const notes = [`${a.taskNo ? `#${a.taskNo} ` : ''}${a.description || a.type}: ${runModel(a)}, ${state}`, fmtCtx(a), fmtCost(a.costUsd)]
   if (ctxOf(a).isGuessed) notes.push(s.guessedWindow)
   return notes.join(', ')
 }
@@ -576,7 +601,7 @@ const agentSvg = (W: number, a: AgentRun, at: number): string => {
     66,
     `${mascot(0, 17, SPRITE_SCALE, a.type, stateOf(a.status), a.status === 'running', a.effort)}
 <text class="t" x="${TEXT_X}" y="18" font-family="${FONT}" font-size="13" font-weight="600">${xml(fitText(a.description || a.type, 13, textW))}</text>
-<text x="${TEXT_X}" y="34" font-family="${FONT}" font-size="11"><tspan fill="${color}">${xml(a.type)}</tspan><tspan class="s">  ${xml(meta.join('  ·  '))}</tspan></text>
+<text x="${TEXT_X}" y="34" font-family="${FONT}" font-size="11">${a.taskNo ? `<tspan class="s">#${a.taskNo}  </tspan>` : ''}<tspan fill="${color}">${xml(a.type)}</tspan><tspan class="s">  ${xml(meta.join('  ·  '))}</tspan></text>
 ${steps && stepsW > 30 ? `<text class="t" x="${TEXT_X}" y="49" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(fitText(steps, 11, stepsW))}</text>` : ''}
 <text class="s" x="${TEXT_X + barW}" y="49" text-anchor="end" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(stats)}</text>
 <rect class="k" x="${TEXT_X}" y="55" width="${barW}" height="4" rx="2"/><rect${progress === null ? ' class="m"' : ''} x="${TEXT_X}" y="55" width="${fillW}" height="4" rx="2"${progress === null ? '' : ` fill="${color}"`}/>
@@ -744,6 +769,7 @@ async function autoOpen($: EngineInterface, key: string): Promise<void> {
 }
 
 export const register: Register = (on, options) => {
+  const warnPercent = Number.isFinite(Number(options.contextWarnPercent)) ? Number(options.contextWarnPercent) : 80
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     lang = await detectLang($, options.language)
@@ -753,6 +779,7 @@ export const register: Register = (on, options) => {
         'Report the plan for work you delegate to subagents, for the progress bar above the prompt and the crew panel. ' +
         'Call it after presenting the plan (title, tasks, optional phase), each time a task is done (done), ' +
         'when switching phase or re-planning (tasks), and once at the end with finished: true. Fields left out keep their previous value. ' +
+        'Start the description of each Agent call for a planned task with `#N ` (the task\'s number in tasks, e.g. "#2 Write the parser") so the panel can match runs to tasks. ' +
         'Write title, task titles and phase in the language you are using with the user. ' +
         'For the main session only: a call from a subagent is ignored (subagents report with `step`).',
       inputSchema: {
@@ -838,6 +865,7 @@ export const register: Register = (on, options) => {
     }
     const next = await update($, flow, p => merge(p, input))
     if (next && input.tasks?.length) await autoOpen($, next.title)
+    if (next?.isFinished && !prev?.isFinished) void $.ui.toast(tr().doneToast(next.title))
     return { result: `ok: ${label(next ?? blank())}` }
   })
 
@@ -881,13 +909,15 @@ export const register: Register = (on, options) => {
     if (started.deny !== undefined) return started
 
     const at = await $.clock.now()
+    const task = linkTask(await read($, flow), e.description)
     await update($, agents, list => {
-      const round = 1 + list.filter(a => norm(a.description) === norm(e.description) && e.description).length
+      const round = 1 + list.filter(a => isSameTask(a, task.taskNo, task.description)).length
       const run: AgentRun = {
         id: started.agentId ?? e.tool_use_id,
         agentId: started.agentId,
         type: e.subagentType,
-        description: e.description,
+        description: task.description,
+        taskNo: task.taskNo,
         model: started.model,
         status: 'running',
         startedAt: at,
@@ -938,6 +968,12 @@ export const register: Register = (on, options) => {
             },
       ),
     )
+    // Once per run: the fill crossed contextWarnPercent (against the 1M guess too).
+    const run = (await read($, agents)).find(a => a.agentId === agentId)
+    if (run && !run.isCtxWarned && ctxOf(run).percent > warnPercent) {
+      await update($, agents, list => list.map(a => (a.agentId === agentId ? { ...a, isCtxWarned: true } : a)))
+      void $.ui.toast(tr().ctxToast(run.description || run.type, fmtCtx(run)))
+    }
     return result
   })
 
@@ -945,6 +981,8 @@ export const register: Register = (on, options) => {
     const agentId = e.agentId
     if (agentId) {
       const at = await $.clock.now()
+      const wasRunning = (await read($, agents)).find(a => a.agentId === agentId && a.status === 'running')
+      if (wasRunning && e.reason !== 'answer') void $.ui.toast(tr().failedToast(wasRunning.description || wasRunning.type))
       await update($, agents, list =>
         list.map((a): AgentRun => {
           if (a.agentId !== agentId) return a
@@ -1082,6 +1120,7 @@ export const register: Register = (on, options) => {
           </Box>
           <Text dimColor wrap="truncate-end">
             {'  '}
+            {a.taskNo ? `#${a.taskNo} · ` : ''}
             {a.type} · {runModel(a)}
             {a.round > 1 ? ` · ${s.round} ${a.round}` : ''}
           </Text>
