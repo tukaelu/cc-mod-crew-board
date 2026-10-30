@@ -30,6 +30,8 @@ const MAX_AFTER = 20
 const MAX_TITLE = 120
 const MAX_PHASE = 40
 const MAX_NOTE = 80
+// The step notes a row keeps: the current one and the two before it.
+const MAX_NOTES = 3
 const MAX_RUNS = 200
 const ACCENT = '#8f8cf4'
 const DONE = '#5fbf8f'
@@ -52,8 +54,8 @@ type Lang = 'en' | 'ja'
 const STRINGS = {
   en: {
     pane: 'Crew',
-    cost: 'Cost',
-    tokens: 'Tokens',
+    cost: 'Total chat cost',
+    tokens: 'Subagent tokens',
     time: 'Time',
     collapse: 'Collapse',
     expand: 'Expand',
@@ -76,7 +78,10 @@ const STRINGS = {
     tasks: 'Tasks',
     busy: (n: number) => `${n} running`,
     ctx: 'ctx',
-    unpriced: 'excluding models missing from the price table',
+    subagents: (n: number) => `${n} subagent${n === 1 ? '' : 's'} in this chat`,
+    stepAt: (n: number) => `Step ${n}`,
+    doneSteps: (n: number) => `Done · ${n} step${n === 1 ? '' : 's'}`,
+    failedAt: (n: number) => `Failed at step ${n}`,
     guessedWindow: 'window unknown, computed against 1M tokens',
     failedToast: (d: string) => `Subagent failed: ${d}`,
     ctxToast: (d: string, ctx: string) => `${d}: ${ctx}`,
@@ -84,8 +89,8 @@ const STRINGS = {
   },
   ja: {
     pane: 'クルー',
-    cost: 'コスト',
-    tokens: 'トークン',
+    cost: 'チャット全体のコスト',
+    tokens: 'サブエージェントのトークン',
     time: '時間',
     collapse: '縮小',
     expand: '展開',
@@ -108,7 +113,10 @@ const STRINGS = {
     tasks: 'タスク',
     busy: (n: number) => `${n} 件実行中`,
     ctx: 'ctx',
-    unpriced: '価格表にないモデルを除く',
+    subagents: (n: number) => `このチャットのサブエージェント ${n} 件`,
+    stepAt: (n: number) => `ステップ ${n}`,
+    doneSteps: (n: number) => `完了 · ${n} ステップ`,
+    failedAt: (n: number) => `ステップ ${n} で失敗`,
     guessedWindow: 'ウィンドウ不明のため 100 万トークンで計算',
     failedToast: (d: string) => `サブエージェントが失敗しました: ${d}`,
     ctxToast: (d: string, ctx: string) => `${d}: ${ctx}`,
@@ -327,41 +335,9 @@ const colorOf = (type: string): string => {
   return hsl(h % 360, 0.55, 0.5)
 }
 
-// "Opus 5.5 · high" for a run, or just the model when no effort was seen.
-// The effort word stays in English in every language.
-const runModel = (a: AgentRun): string => (a.effort ? `${modelName(a.model)} · ${a.effort}` : modelName(a.model))
+const runModel = (a: AgentRun): string => modelName(a.model)
 
-// USD per million tokens: input, output, cache read, cache write.
-// List prices from https://platform.claude.com/docs/en/about-claude/pricing as of 2026-10.
-// A model is priced only when its id, version included, is in this table: no
-// family-name match and no default. The engine reports one cache-write count
-// with no split by lifetime; writes are priced at the 1-hour rate, which is
-// what Claude Code writes on a subscription.
-type Price = [input: number, output: number, cacheRead: number, cacheWrite: number]
-
-const PRICES: Record<string, Price> = {
-  'claude-fable-5-1': [10, 50, 0.25, 20],
-  'claude-mythos-5-1': [10, 50, 0.25, 20],
-  'claude-fable-5': [10, 50, 1, 20],
-  'claude-mythos-5': [10, 50, 1, 20],
-  'claude-opus-5-5': [4, 20, 0.2, 8],
-  'claude-opus-5': [5, 25, 0.5, 10],
-  'claude-opus-4-8': [5, 25, 0.5, 10],
-  'claude-opus-4-7': [5, 25, 0.5, 10],
-  'claude-opus-4-6': [5, 25, 0.5, 10],
-  'claude-sonnet-5-5': [2, 10, 0.1, 4],
-  'claude-sonnet-5': [2, 10, 0.2, 4],
-  'claude-sonnet-4-6': [3, 15, 0.3, 6],
-  'claude-haiku-5-5': [0.1, 0.5, 0.01, 0.2],
-  'claude-haiku-4-5': [1, 5, 0.1, 2],
-}
-
-// Haiku 5.5 is priced by prompt length: a request whose prompt (input, cache reads and
-// cache writes together) is over 100,000 tokens pays these prices instead.
-const HAIKU_LONG_PROMPT = 100_000
-const HAIKU_LONG: Price = [0.5, 2.5, 0.05, 1]
-
-// Context windows in tokens, from the same docs as of 2026-10.
+// Context windows in tokens, from https://platform.claude.com/docs/en/about-claude/models/overview as of 2026-10.
 const WINDOWS: Record<string, number> = {
   'claude-fable-5-1': 1_000_000,
   'claude-mythos-5-1': 1_000_000,
@@ -380,13 +356,6 @@ const WINDOWS: Record<string, number> = {
 }
 const GUESSED_WINDOW = 1_000_000
 
-type Usage = {
-  input_tokens: number
-  output_tokens: number
-  cache_read_input_tokens: number
-  cache_creation_input_tokens: number
-}
-
 // `claude-opus-5-5[1m]` and `claude-haiku-4-5-20251001` name the same version as
 // the bare id: only the bracketed variant and the date snapshot are dropped.
 const modelKey = (model: string): string =>
@@ -395,33 +364,6 @@ const modelKey = (model: string): string =>
     .toLowerCase()
     .replace(/\[[^\]]*\]$/, '')
     .replace(/-\d{8}$/, '')
-
-const priceOf = (model: string, prompt: number): Price | null => {
-  const id = modelKey(model)
-  if (id === 'claude-haiku-5-5' && prompt > HAIKU_LONG_PROMPT) return HAIKU_LONG
-  return Object.hasOwn(PRICES, id) ? (PRICES[id] ?? null) : null
-}
-
-// `isRequest` says the usage is one model request, which is what a prompt-length price
-// is set by. null: not priced.
-const costOf = (model: string, u: Usage, isRequest: boolean): number | null => {
-  // A turn's sum hides how long each request's prompt was, so a model priced by
-  // prompt length cannot be priced from it.
-  if (!isRequest && modelKey(model) === 'claude-haiku-5-5') return null
-  const prompt = isRequest ? (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) : 0
-  const price = priceOf(model, prompt)
-  if (!price) return null
-  const [i, o, r, w] = price
-  return (
-    ((u.input_tokens || 0) * i +
-      (u.output_tokens || 0) * o +
-      (u.cache_read_input_tokens || 0) * r +
-      (u.cache_creation_input_tokens || 0) * w) /
-    1e6
-  )
-}
-
-const addCost = (a: number | null, b: number | null): number | null => (a === null || b === null ? null : a + b)
 
 const windowOf = (model: string): { max: number; isGuessed: boolean } => {
   const id = modelKey(model)
@@ -443,8 +385,8 @@ const fmtTokens = (n: number): string =>
 
 const fmtUsd = (usd: number): string => `$${usd < 10 ? usd.toFixed(2) : usd.toFixed(1)}`
 
-// A run's cost, or "—" when its model is not in the price table.
-const fmtCost = (usd: number | null): string => (usd === null ? '—' : `≈${fmtUsd(usd)}`)
+// The chat's own total as the engine counts it; "—" where the host keeps none.
+const fmtChat = (usd: number | undefined): string => (usd === undefined ? '—' : fmtUsd(usd))
 
 const fmtTime = (ms: number): string => {
   const s = Math.max(0, Math.round(ms / 1000))
@@ -491,20 +433,15 @@ const relink = (a: AgentRun, before: PlannedTask[], after: PlannedTask[]): Agent
 const isSameTask = (a: AgentRun, taskNo: number | undefined, description: string): boolean =>
   taskNo !== undefined ? a.taskNo === taskNo : !!description && a.taskNo === undefined && norm(a.description) === norm(description)
 
-// Subagents only: the main session's own spend is not counted. The cost sums
-// what could be priced; `isPartial` says some run could not, so it is a floor.
+// The subagents' tokens and the span from the first start to the last end.
 const totals = (list: AgentRun[], at: number) => {
-  const cost = list.reduce((s, a) => s + (a.costUsd ?? 0), 0)
-  const isPartial = list.some(a => a.costUsd === null)
   const tokens = list.reduce((s, a) => s + a.tokens, 0)
   const start = Math.min(...list.map(a => a.startedAt))
   const end = Math.max(...list.map(a => a.endedAt ?? Math.max(at, a.startedAt)))
-  return { cost, isPartial, tokens, time: list.length ? end - start : 0 }
+  return { tokens, time: list.length ? end - start : 0 }
 }
 
-type Totals = ReturnType<typeof totals>
-
-const fmtTotal = (t: Totals): string => `≈${fmtUsd(t.cost)}${t.isPartial ? '+' : ''}`
+type Totals = ReturnType<typeof totals> & { chatUsd: number | undefined }
 
 // --- desktop drawings: each row is one SVG, as the band above the prompt is.
 
@@ -524,8 +461,8 @@ const gridSvg = (W: number, H: number) => `<svg xmlns="http://www.w3.org/2000/sv
 </svg>`
 
 const PANE_CSS = `<style>
-.t{fill:#1f1f1f}.s{fill:#6b6b68}.m{fill:#9a9a96}.k{fill:#ecebe8}.ln{stroke:#e4e4e1}.tile{fill:#f4f3f0}
-@media (prefers-color-scheme: dark){.t{fill:#ececec}.s{fill:#a8a8a4}.m{fill:#7d7d79}.k{fill:#2c2c2b}.ln{stroke:#333331}.tile{fill:#262625}}
+.t{fill:#1f1f1f}.s{fill:#6b6b68}.m{fill:#9a9a96}.k{fill:#ecebe8}.ln{stroke:#e4e2dc}.tile{fill:#ffffff;stroke:#e4e2dc}.card{fill:#ffffff}
+@media (prefers-color-scheme: dark){.t{fill:#ececec}.s{fill:#a8a8a4}.m{fill:#7d7d79}.k{fill:#2c2c2b}.ln{stroke:#3a3a38}.tile{fill:#262625;stroke:#3a3a38}.card{fill:#262625}}
 .live{animation:p 1.6s ease-in-out infinite}@keyframes p{50%{opacity:.3}}
 @media (prefers-reduced-motion: reduce){.live{animation:none}}
 </style>`
@@ -536,10 +473,6 @@ const mascot = (x: number, y: number, scale: number, type: string, state: Mascot
   `<g transform="translate(${x},${y}) scale(${scale})" shape-rendering="crispEdges">${mendako(costumeOf(type), state, colorOf(type), effort, isMoving)}</g>`
 
 const stateOf = (status: AgentRun['status']): MascotState => (status === 'running' ? 'run' : status === 'done' ? 'done' : 'fail')
-
-// Panel sprites draw two pixels per cell: 44×32.
-const SPRITE_SCALE = 2
-const TEXT_X = 52
 
 const statusMark = (x: number, y: number, status: string, color: string): string => {
   if (status === 'running') return `<circle class="live" cx="${x}" cy="${y}" r="3.5" fill="${color}"/>`
@@ -552,26 +485,26 @@ const statusMark = (x: number, y: number, status: string, color: string): string
 const svg = (W: number, H: number, body: string, hasMascot = true): string =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${PANE_CSS}${hasMascot ? MASCOT_CSS : ''}${body}</svg>`
 
-// The pane's own title already says "Crew": the header names the plan, if any.
+// The header: the plan's name (or how many subagents there are), then the chat's
+// total cost, the subagents' tokens and their time.
 const headerSvg = (W: number, title: string, t: Totals): string => {
   const s = tr()
-  const gap = 6
+  const gap = 8
   const tw = (W - gap * 2) / 3
-  const top = title ? 28 : 0
   const tile = (i: number, k: string, v: string) =>
-    `<rect class="tile" x="${i * (tw + gap)}" y="${top}" width="${tw}" height="40" rx="8"/>
-<text class="s" x="${i * (tw + gap) + 9}" y="${top + 16}" font-family="${FONT}" font-size="11">${k}</text>
-<text class="t" x="${i * (tw + gap) + 9}" y="${top + 33}" font-family="${FONT}" font-size="15" font-weight="600" font-variant-numeric="tabular-nums">${v}</text>`
+    `<rect class="tile" x="${i * (tw + gap) + 0.5}" y="28.5" width="${tw - 1}" height="47" rx="8"/>
+<text class="s" x="${i * (tw + gap) + 11}" y="47" font-family="${FONT}" font-size="11">${xml(fitText(k, 11, tw - 18))}</text>
+<text class="t" x="${i * (tw + gap) + 11}" y="66" font-family="${FONT}" font-size="15" font-weight="600" font-variant-numeric="tabular-nums">${v}</text>`
   return svg(
     W,
-    headerHeight(title),
-    `${title ? `<text class="t" x="0" y="15" font-family="${FONT}" font-size="14" font-weight="600">${xml(fitText(title, 14, W))}</text>` : ''}
-${tile(0, s.cost, fmtTotal(t))}${tile(1, s.tokens, fmtTokens(t.tokens))}${tile(2, s.time, fmtTime(t.time))}`,
+    HEADER_H,
+    `<text x="0" y="16" fill="#D97757" font-family="${FONT}" font-size="14" font-weight="600">${xml(fitText(title, 14, W))}</text>
+${tile(0, s.cost, fmtChat(t.chatUsd))}${tile(1, s.tokens, fmtTokens(t.tokens))}${tile(2, s.time, fmtTime(t.time))}`,
     false,
   )
 }
 
-const headerHeight = (title: string): number => (title ? 72 : 44)
+const HEADER_H = 84
 
 // The task's own progress when the subagent reports steps; a finished run is full.
 const progressOf = (a: AgentRun): number | null => {
@@ -591,56 +524,90 @@ const fmtCtx = (a: AgentRun): string => {
   return `${tr().ctx} ${c.percent}%${c.isGuessed ? '?' : ''}`
 }
 
-// What the alt text adds for the figures a sighted reader sees marked `+` or `?`.
+// What the alt text adds for the figure a sighted reader sees marked `?`.
 const runAlt = (a: AgentRun, state: string): string => {
   const s = tr()
-  const notes = [`${a.taskNo ? `#${a.taskNo} ` : ''}${a.description || a.type}: ${runModel(a)}, ${state}`, fmtCtx(a), fmtCost(a.costUsd)]
+  const notes = [`${a.taskNo ? `#${a.taskNo} ` : ''}${a.description || a.type}: ${runModel(a)}, ${state}`, fmtCtx(a), `${fmtTokens(a.tokens)} ${s.tokensWord}`]
   if (ctxOf(a).isGuessed) notes.push(s.guessedWindow)
   return notes.join(', ')
+}
+
+// A row's step line: where it stands, colored by how the run is going, and the
+// notes under it. Nothing when the run never reported steps (and did not fail).
+const STEP_COLOR = { running: '#D97757', done: '#3B9C5F', failed: '#D0453F' }
+
+const stepLines = (a: AgentRun): { head: string; notes: string[] } | null => {
+  const s = tr()
+  const notes = a.stepNotes ?? []
+  const at = Math.min(a.stepTotal || Infinity, (a.stepDone ?? 0) + 1)
+  if (a.status === 'failed') return { head: a.stepTotal ? s.failedAt(at) : s.failed, notes: notes.slice(-2) }
+  if (!a.stepTotal) return null
+  // Done: the last notes. Working: the current one in the head, the two before it under it.
+  if (a.status === 'done') return { head: s.doneSteps(a.stepTotal), notes: notes.slice(-2) }
+  const current = notes.at(-1)
+  return { head: `${s.stepAt(at)}${current ? ` · ${current}` : ''}`, notes: notes.slice(-3, -1) }
+}
+
+// Card rows. The sprite draws three pixels per cell (66×48) in the card's left column.
+const PAD = 12
+const TEXT_X = 92
+const CARD_GAP = 8
+const LINE = 18
+
+const cardHeight = (a: AgentRun): number => {
+  const steps = stepLines(a)
+  return 62 + (steps ? 22 + steps.notes.length * LINE : 0) + PAD
 }
 
 const agentSvg = (W: number, a: AgentRun, at: number): string => {
   const s = tr()
   const color = colorOf(a.type)
   const ctx = ctxOf(a)
-  const textW = W - TEXT_X - 22
-  const meta = [runModel(a)]
-  if (a.round > 1) meta.push(`${s.round} ${a.round}`)
-  if (a.status === 'failed') meta.push(s.failed)
-  const barW = textW
+  const H = cardHeight(a)
+  const textW = W - TEXT_X - PAD
+  const stats = `${fmtCtx(a)} · ${fmtTokens(a.tokens)} ${s.tokensWord} · ${fmtTime(elapsed(a, at))}`
+  const metaW = Math.max(40, textW - textWidth(stats, 11) - 12)
+  const meta = [a.type, runModel(a), ...(a.round > 1 ? [`${s.round} ${a.round}`] : [])].join(' · ')
+  const steps = stepLines(a)
   const progress = progressOf(a)
-  const stats = `${fmtCtx(a)} · ${fmtTokens(a.contextTokens)}  ${fmtCost(a.costUsd)}  ${fmtTime(elapsed(a, at))}`
-  const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' · ' + a.stepNote : ''}` : ''
-  const stepsW = Math.max(0, barW - textWidth(stats, 11) - 12)
   // Without reported steps the bar falls back to the context, drawn grey.
-  const fillW = Math.round(barW * (progress ?? ctx.percent / 100))
+  const fillW = Math.round(textW * (progress ?? ctx.percent / 100))
+  const stepColor = STEP_COLOR[a.status]
+  let y = 68
+  const stepSvg = steps
+    ? `<path d="M${TEXT_X + 5} ${y - 9}a5 5 0 1 0 0.01 0z" fill="none" stroke="${stepColor}" stroke-width="1.4"/><path d="M${TEXT_X + 5} ${y - 9}a5 5 0 0 0 0 10z" fill="${stepColor}"/>
+<text x="${TEXT_X + 16}" y="${y}" fill="${stepColor}" font-family="${FONT}" font-size="12.5" font-weight="600">${xml(fitText(steps.head, 12.5, textW - 16))}</text>
+${steps.notes.map(n => `<text class="t" x="${TEXT_X + 16}" y="${(y += LINE)}" font-family="${FONT}" font-size="12">${xml(fitText(n, 12, textW - 16))}</text>`).join('')}`
+    : ''
+  const barY = H - PAD - 3
   return svg(
     W,
-    66,
-    `${mascot(0, 17, SPRITE_SCALE, a.type, stateOf(a.status), a.status === 'running', a.effort)}
-<text class="t" x="${TEXT_X}" y="18" font-family="${FONT}" font-size="13" font-weight="600">${xml(fitText(a.description || a.type, 13, textW))}</text>
-<text x="${TEXT_X}" y="34" font-family="${FONT}" font-size="11">${a.taskNo ? `<tspan class="s">#${a.taskNo}  </tspan>` : ''}<tspan fill="${color}">${xml(a.type)}</tspan><tspan class="s">  ${xml(meta.join('  ·  '))}</tspan></text>
-${steps && stepsW > 30 ? `<text class="t" x="${TEXT_X}" y="49" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(fitText(steps, 11, stepsW))}</text>` : ''}
-<text class="s" x="${TEXT_X + barW}" y="49" text-anchor="end" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(stats)}</text>
-<rect class="k" x="${TEXT_X}" y="55" width="${barW}" height="4" rx="2"/><rect${progress === null ? ' class="m"' : ''} x="${TEXT_X}" y="55" width="${fillW}" height="4" rx="2"${progress === null ? '' : ` fill="${color}"`}/>
-${statusMark(W - 8, 16, a.status, color)}
-<line class="ln" x1="0" y1="65.5" x2="${W}" y2="65.5"/>`,
+    H + CARD_GAP,
+    `<rect class="card${a.status === 'running' ? '' : ' ln'}" x="0.75" y="0.75" width="${W - 1.5}" height="${H - 1.5}" rx="10"${a.status === 'running' ? ` stroke="${color}" stroke-width="1.5"` : ''}/>
+${mascot(13, (H - 48) / 2, 3, a.type, stateOf(a.status), a.status === 'running', a.effort)}
+<text class="t" x="${TEXT_X}" y="26" font-family="${FONT}" font-size="14" font-weight="600">${xml(fitText(a.description || a.type, 14, textW - 20))}</text>
+${statusMark(W - PAD - 6, 21, a.status, color)}
+<text class="s" x="${TEXT_X}" y="45" font-family="${FONT}" font-size="11">${a.taskNo ? `#${a.taskNo}  ` : ''}${xml(fitText(meta, 11, metaW - (a.taskNo ? 22 : 0)))}</text>
+<text class="s" x="${W - PAD}" y="45" text-anchor="end" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(stats)}</text>
+${stepSvg}
+<rect class="k" x="${TEXT_X}" y="${barY}" width="${textW}" height="3" rx="1.5"/><rect${progress === null ? ' class="m"' : ''} x="${TEXT_X}" y="${barY}" width="${fillW}" height="3" rx="1.5"${progress === null ? '' : ` fill="${color}"`}/>`,
   )
 }
 
+const PLANNED_H = 64
+
 const plannedSvg = (W: number, p: Planned): string => {
   const color = colorOf(p.type)
-  const textW = W - TEXT_X - 22
-  const meta: string[] = []
-  if (p.after.length) meta.push(`${tr().after} ${p.after.join(', ')}`)
+  const textW = W - TEXT_X - PAD
+  const meta = [p.type, ...(p.after.length ? [`${tr().after} ${p.after.join(', ')}`] : [])].filter(Boolean).join(' · ')
   return svg(
     W,
-    46,
-    `${mascot(0, 7, SPRITE_SCALE, p.type, 'wait')}
-<text class="s" x="${TEXT_X}" y="18" font-family="${FONT}" font-size="13" font-weight="600">${xml(fitText(`${p.n}. ${p.title}`, 13, textW))}</text>
-<text x="${TEXT_X}" y="34" font-family="${FONT}" font-size="11"><tspan fill="${color}">${xml(p.type)}</tspan><tspan class="m">  ${xml(meta.join('  ·  '))}</tspan></text>
-${statusMark(W - 8, 16, 'planned', color)}
-<line class="ln" x1="0" y1="45.5" x2="${W}" y2="45.5"/>`,
+    PLANNED_H + CARD_GAP,
+    `<rect class="card ln" x="0.75" y="0.75" width="${W - 1.5}" height="${PLANNED_H - 1.5}" rx="10" stroke-dasharray="4 3"/>
+${mascot(13, (PLANNED_H - 48) / 2, 3, p.type, 'wait')}
+<text class="s" x="${TEXT_X}" y="27" font-family="${FONT}" font-size="14" font-weight="600">${xml(fitText(`${p.n}. ${p.title}`, 14, textW - 20))}</text>
+${statusMark(W - PAD - 6, 21, 'planned', color)}
+<text class="m" x="${TEXT_X}" y="46" font-family="${FONT}" font-size="11">${xml(fitText(meta, 11, textW))}</text>`,
   )
 }
 
@@ -665,9 +632,13 @@ const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: Totals):
     W,
     32,
     `${body}${more ? `<text class="s" x="${x}" y="21" font-family="${FONT}" font-size="12">+${more}</text>` : ''}
-<text class="s" x="${W}" y="21" text-anchor="end" font-family="${FONT}" font-size="12" font-variant-numeric="tabular-nums">${fmtTotal(t)} · ${fmtTokens(t.tokens)} · ${fmtTime(t.time)}</text>`,
+<text class="s" x="${W}" y="21" text-anchor="end" font-family="${FONT}" font-size="12" font-variant-numeric="tabular-nums">${fmtChat(t.chatUsd)} · ${fmtTokens(t.tokens)} · ${fmtTime(t.time)}</text>`,
   )
 }
+
+// Section heads on the desktop: a colored bar per section.
+const SECTION_COLOR = { running: '#1F9D55', finished: '#E0A419', planned: '#9A9A96' }
+const SECTION_H = 30
 
 // --- terminal drawing: the same rows in text.
 
@@ -907,7 +878,10 @@ export const register: Register = (on, options) => {
         const total = Math.max(0, Math.round(Number(input.total ?? a.stepTotal ?? 0) || 0))
         const done = Math.max(0, Math.round(Number(input.done ?? a.stepDone ?? 0) || 0))
         const note = clip(str(input.note), MAX_NOTE)
-        return { ...a, stepTotal: total, stepDone: total ? Math.min(total, done) : done, stepNote: note || undefined }
+        const notes = a.stepNotes ?? []
+        // A new note joins the history; repeating the current one adds nothing.
+        const stepNotes = note && note !== notes.at(-1) ? [...notes, note].slice(-MAX_NOTES) : notes
+        return { ...a, stepTotal: total, stepDone: total ? Math.min(total, done) : done, stepNotes }
       }),
     )
     return { result: matched ? 'ok' : `ignored: no panel row for agent ${agentId}` }
@@ -948,7 +922,6 @@ export const register: Register = (on, options) => {
         startedAt: at,
         contextTokens: 0,
         tokens: 0,
-        costUsd: 0,
         steps: 0,
         round,
       }
@@ -988,7 +961,6 @@ export const register: Register = (on, options) => {
                 (usage.output_tokens || 0) +
                 (usage.cache_read_input_tokens || 0) +
                 (usage.cache_creation_input_tokens || 0),
-              costUsd: addCost(a.costUsd, costOf(model, usage, true)),
               steps: a.steps + 1,
             },
       ),
@@ -1025,7 +997,6 @@ export const register: Register = (on, options) => {
                     e.usage.output_tokens +
                     e.usage.cache_read_input_tokens +
                     e.usage.cache_creation_input_tokens,
-                  costUsd: costOf(e.usage.model || a.model, e.usage, false),
                 }
               : {}),
           }
@@ -1048,9 +1019,11 @@ export const register: Register = (on, options) => {
     const running = list.filter(a => a.status === 'running').reverse()
     const finished = list.filter(a => a.status !== 'running').reverse()
     const planned = plannedOf(f, list)
-    const t = totals(list, at)
-    // The pane's title says "Crew"; inside, only the plan's own name.
-    const title = f && !f.isFinished ? f.title : ''
+    // The chat's own total, from the engine's ledger; absent where the host keeps none.
+    const chatUsd = (await $.session.usage().catch(() => null))?.cost?.usd
+    const t: Totals = { ...totals(list, at), chatUsd }
+    // The pane's title says "Crew"; inside, the plan's own name, else the count.
+    const title = f && !f.isFinished ? f.title : s.subagents(list.length)
 
     const toggleCompact = (
       <Button
@@ -1069,15 +1042,28 @@ export const register: Register = (on, options) => {
       />
     )
     const isEmpty = list.length === 0 && planned.length === 0
-    const summary = `${fmtTotal(t)}${t.isPartial ? ` (${s.unpriced})` : ''}, ${fmtTokens(t.tokens)} ${s.tokensWord}, ${fmtTime(t.time)}`
+    const summary = `${s.cost} ${fmtChat(t.chatUsd)}, ${fmtTokens(t.tokens)} ${s.tokensWord}, ${fmtTime(t.time)}`
 
     if (e.surface === 'desktop' && 'Svg' in ui) {
       const { Svg } = ui
       const W = Math.max(240, Math.min(900, (e.props.bodyColumns || 40) * 8 - 8))
-      const section = (key: string, text: string) => (
-        <Text key={key} dimColor>
-          {text}
-        </Text>
+      const section = (key: string, color: string, label: JSX.Element | string) => (
+        <Box key={key} backgroundColor={color} paddingX={1} marginBottom={1}>
+          {typeof label === 'string' ? (
+            <Text color="#ffffff" bold>
+              {label}
+            </Text>
+          ) : (
+            label
+          )}
+        </Box>
+      )
+      const doneHead = (
+        <Button key="done" plain onPress={() => update($, panel, prev => ({ ...prev, isDoneCollapsed: !prev.isDoneCollapsed }))}>
+          <Text color="#ffffff" bold>
+            {`${p.isDoneCollapsed ? '▸' : '▾'} ${s.finished} · ${finished.length}`}
+          </Text>
+        </Button>
       )
 
       if (p.isCompact) {
@@ -1088,9 +1074,15 @@ export const register: Register = (on, options) => {
           </Box>
         )
       }
-      const shownDone = p.isDoneCollapsed ? 0 : finished.length
-      const lines = 1 + (isEmpty ? 1 : 0) + (running.length > 0 ? 1 : 0) + (finished.length > 0 ? 1 : 0) + (planned.length > 0 ? 1 : 0)
-      const gridH = headerHeight(title) + lines * LINE_H + (running.length + shownDone) * 66 + planned.length * 46
+      const shownDone = p.isDoneCollapsed ? [] : finished
+      const sections = [running.length, finished.length, planned.length].filter(n => n > 0).length
+      const gridH =
+        HEADER_H +
+        LINE_H +
+        (isEmpty ? LINE_H : 0) +
+        sections * SECTION_H +
+        [...running, ...shownDone].reduce((h, a) => h + cardHeight(a) + CARD_GAP, 0) +
+        planned.length * (PLANNED_H + CARD_GAP)
       return (
         <Box flexDirection="column">
           {/* The grid sizes the pane; the content is placed over it, as an
@@ -1099,27 +1091,26 @@ export const register: Register = (on, options) => {
             <Svg key={`grid-${i}`} source={gridSvg(W, tileH)} alt="dotted grid" width={W} height={tileH} />
           ))}
           <Box flexDirection="column" position="absolute" top={0} left={0} right={0}>
-            <Svg source={headerSvg(W, title, t)} alt={title ? `${title}: ${summary}` : summary} width={W} height={headerHeight(title)} />
+            <Svg source={headerSvg(W, title, t)} alt={`${title}: ${summary}`} width={W} height={HEADER_H} />
             {toggleCompact}
             {isEmpty && <Text dimColor>{s.empty}</Text>}
-            {running.length > 0 && section('h-run', `${s.running} · ${running.length}`)}
+            {running.length > 0 && section('h-run', SECTION_COLOR.running, `▾ ${s.running} · ${running.length}`)}
             {running.map(a => (
-              <Svg key={a.id} source={agentSvg(W, a, at)} alt={runAlt(a, s.isRunning)} width={W} height={66} />
+              <Svg key={a.id} source={agentSvg(W, a, at)} alt={runAlt(a, s.isRunning)} width={W} height={cardHeight(a) + CARD_GAP} />
             ))}
-            {finished.length > 0 && toggleDone}
-            {!p.isDoneCollapsed &&
-              finished.map(a => (
-                <Svg
-                  key={a.id}
-                  source={agentSvg(W, a, at)}
-                  alt={runAlt(a, a.status === 'failed' ? s.isFailed : s.isFinished)}
-                  width={W}
-                  height={66}
-                />
-              ))}
-            {planned.length > 0 && section('h-plan', `${s.planned} · ${planned.length}`)}
+            {finished.length > 0 && section('h-done', SECTION_COLOR.finished, doneHead)}
+            {shownDone.map(a => (
+              <Svg
+                key={a.id}
+                source={agentSvg(W, a, at)}
+                alt={runAlt(a, a.status === 'failed' ? s.isFailed : s.isFinished)}
+                width={W}
+                height={cardHeight(a) + CARD_GAP}
+              />
+            ))}
+            {planned.length > 0 && section('h-plan', SECTION_COLOR.planned, `${s.planned} · ${planned.length}`)}
             {planned.map(pl => (
-              <Svg key={`plan-${pl.n}`} source={plannedSvg(W, pl)} alt={`${pl.n}. ${pl.title}: ${s.isPlanned}`} width={W} height={46} />
+              <Svg key={`plan-${pl.n}`} source={plannedSvg(W, pl)} alt={`${pl.n}. ${pl.title}: ${s.isPlanned}`} width={W} height={PLANNED_H + CARD_GAP} />
             ))}
           </Box>
         </Box>
@@ -1133,7 +1124,7 @@ export const register: Register = (on, options) => {
       const color = colorOf(a.type)
       const ctx = ctxOf(a)
       const progress = progressOf(a)
-      const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' ' + a.stepNote : ''} · ` : ''
+      const steps = stepLines(a)
       return (
         <Box key={a.id} flexDirection="column" marginBottom={1}>
           <Box flexDirection="row" gap={1}>
@@ -1154,10 +1145,21 @@ export const register: Register = (on, options) => {
             {progress === null ? <Text dimColor>{ctxBar(ctx.percent, barW)}</Text> : <Text color={color}>{ctxBar(progress * 100, barW)}</Text>}
             <Text dimColor>
               {' '}
-              {steps}
-              {fmtCtx(a)} · {fmtTokens(a.contextTokens)} {fmtCost(a.costUsd)} {fmtTime(elapsed(a, at))}
+              {fmtCtx(a)} · {fmtTokens(a.tokens)} {s.tokensWord} · {fmtTime(elapsed(a, at))}
             </Text>
           </Text>
+          {steps && (
+            <Text color={STEP_COLOR[a.status]} wrap="truncate-end">
+              {'  '}
+              {steps.head}
+            </Text>
+          )}
+          {steps?.notes.map((n, i) => (
+            <Text key={`note-${i}`} wrap="truncate-end">
+              {'    '}
+              {n}
+            </Text>
+          ))}
         </Box>
       )
     }
@@ -1171,7 +1173,7 @@ export const register: Register = (on, options) => {
           {toggleCompact}
         </Box>
         <Text dimColor>
-          {fmtTotal(t)} · {fmtTokens(t.tokens)} {s.tokensWord} · {fmtTime(t.time)}
+          {s.cost} {fmtChat(t.chatUsd)} · {fmtTokens(t.tokens)} {s.tokensWord} · {fmtTime(t.time)}
         </Text>
         {p.isCompact ? (
           <Text wrap="truncate-end">

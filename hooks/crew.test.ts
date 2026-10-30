@@ -133,8 +133,12 @@ test('step: a subagent reports on its own row only; the main session cannot', as
   await spawn($, 'Second')
   expect(await $.tool.call({ tool: STEP, agentId: 'a2', done: 1, total: 4, note: 'reading' } as never)).toMatchObject({ result: 'ok' })
   expect(await $.tool.call({ tool: STEP, done: 3, total: 3 } as never)).toMatchObject({ result: 'ignored: only subagents report steps' })
+  await $.tool.call({ tool: STEP, agentId: 'a2', done: 2, note: 'writing' } as never)
+  await $.tool.call({ tool: STEP, agentId: 'a2', done: 2, note: 'writing' } as never)
   const shown = await texts($)
-  expect(shown).toContain('1/4 reading')
+  // The current step leads; the note before it is kept under it, once.
+  expect(shown).toContain('Step 3 · writing')
+  expect(shown.match(/^ +reading$/gm)?.length).toBe(1)
   expect(shown).not.toContain('3/3')
   // The row of a1 has no steps: its line starts at the context.
   expect(shown).toMatch(/░ ctx 0%/)

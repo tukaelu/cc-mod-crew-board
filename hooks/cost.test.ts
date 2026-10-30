@@ -7,112 +7,67 @@ const pane = { title: '', isFocused: false, bodyColumns: 60, placement: 'dock', 
 
 type Usage = { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }
 
-// One subagent on `model`, known to the panel before any usage arrives; `request` is
-// what each of its model requests reports.
-const worker = async ($: Engine, on: On, model: string, request?: Usage) => {
+// One subagent on `model`; `request` is what each of its model requests reports.
+// `chatUsd` is what the engine's ledger says the whole chat cost; undefined, it keeps none.
+const worker = async ($: Engine, on: On, model: string, request: Usage, chatUsd?: number) => {
   mock.clock(on)
   on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: {}, rateLimits: [], ...(chatUsd === undefined ? {} : { cost: { usd: chatUsd } }) } }) as never)
   on('agent.spawn', () => ({ model, agentId: 'a1' }))
-  on('turn.complete', () => ({ text: '' }) as never)
   on('turn.step', async function* () {
-    return { turnId: 'turn', index: 0, answer: '', toolUses: [], stopReason: 'end_turn', usage: request ? { model, ...request } : null } as never
+    return { turnId: 'turn', index: 0, answer: '', toolUses: [], stopReason: 'end_turn', usage: { model, ...request } } as never
   })
-  await $.agent.spawn({ tool_use_id: 't1', prompt: 'p', description: 'Priced work', subagentType: 'general-purpose', provider: 'engine', parentModel: model, background: false, fork: false } as never)
-}
-
-// One model request of the subagent, as `turn.step` reports it.
-const step = async ($: Engine, model: string) => {
+  await $.agent.spawn({ tool_use_id: 't1', prompt: 'p', description: 'Work', subagentType: 'general-purpose', provider: 'engine', parentModel: model, background: false, fork: false } as never)
   const stream = ($.turn.step as (e: unknown) => AsyncIterable<unknown>)({ turnId: 'turn', index: 0, model, messageCount: 1, agentId: 'a1' })
   for await (const _ of stream) void _
 }
 
-const complete = ($: Engine, model: string, usage: Usage) =>
-  ($.turn.complete as (e: unknown) => Promise<unknown>)({ agentId: 'a1', reason: 'answer', answer: 'ok', usage: { model, ...usage } })
-
-const mountPane = ($: Engine, surface: 'terminal' | 'desktop') =>
-  $.ui.mount({ plugin: PLUGIN, surface, component: 'Pane', requestId: 'crew-agents', props: pane })
-
-const shows = async ($: Engine, text: RegExp) => {
-  const ui = await mountPane($, 'terminal')
-  const found = await ui.find({ type: 'Text', text })
+const texts = async ($: Engine, surface: 'terminal' | 'desktop') => {
+  const ui = await $.ui.mount({ plugin: PLUGIN, surface, component: 'Pane', requestId: 'crew-agents', props: pane })
+  const out = [
+    ...(await ui.findAll({ type: 'Text' })).map(el => String(el.text ?? '')),
+    ...(await ui.findAll({ type: 'Svg' })).map(el => `${String(el.props.alt)}\n${String(el.props.source)}`),
+  ].join('\n')
   await ui.unmount()
-  return found
+  return out
 }
 
-// List prices in USD per million tokens, cache writes at the 1-hour rate: a turn of
-// 1M input, 1M output, 2M cache read and 1M cache write costs input + output + 2 × read + write.
-const TURN: Usage = { input_tokens: 1e6, output_tokens: 1e6, cache_read_input_tokens: 2e6, cache_creation_input_tokens: 1e6 }
-const PRICED: readonly (readonly [model: string, shown: string])[] = [
-  ['claude-fable-5-1', '$80.5'], // 10 + 50 + 2 × 0.25 + 20
-  ['claude-fable-5', '$82.0'], // 10 + 50 + 2 × 1 + 20
-  ['claude-opus-5-5', '$32.4'], // 4 + 20 + 2 × 0.20 + 8
-  ['claude-opus-5', '$41.0'], // 5 + 25 + 2 × 0.50 + 10
-  ['claude-opus-4-8', '$41.0'],
-  ['claude-sonnet-5-5', '$16.2'], // 2 + 10 + 2 × 0.10 + 4
-  ['claude-sonnet-5', '$16.4'], // 2 + 10 + 2 × 0.20 + 4
-  ['claude-sonnet-4-6', '$24.6'], // 3 + 15 + 2 × 0.30 + 6
-  ['claude-haiku-4-5', '$8.20'], // 1 + 5 + 2 × 0.10 + 2
-  // A bracketed variant and a date snapshot are the same version.
-  ['claude-opus-5-5[1m]', '$32.4'],
-  ['claude-haiku-4-5-20251001', '$8.20'],
-]
-
-for (const [model, shown] of PRICED) {
-  test(`cost: a turn on ${model} shows ≈${shown}`, async ($, on) => {
-    await worker($, on, model)
-    await complete($, model, TURN)
-    expect(await shows($, new RegExp(`≈\\${shown} `))).toBeDefined()
-  })
-}
-
-// Matching the family alone, or a version the table lacks, would be a guess: no amount is shown.
-for (const model of ['claude-opus-4-9', 'claude-opus', 'claude-sonnet-5-6', 'gpt-5']) {
-  test(`cost: ${model} is not in the price table and shows —`, async ($, on) => {
-    await worker($, on, model)
-    await complete($, model, TURN)
-    expect(await shows($, /\s— \d+:\d\d/)).toBeDefined()
-    // The header sums what could be priced and marks it as a floor.
-    expect(await shows($, /^≈\$0\.00\+/)).toBeDefined()
-  })
-}
-
-// A turn's sum hides each request's prompt length, which Haiku 5.5's price depends on.
-test('cost: Haiku 5.5 known only from the turn\'s sum shows —, not a guess at the short-prompt price', async ($, on) => {
-  await worker($, on, 'claude-haiku-5-5')
-  await complete($, 'claude-haiku-5-5', TURN)
-  expect(await shows($, /\s— \d+:\d\d/)).toBeDefined()
-})
-
-test('cost: Haiku 5.5 seen request by request is priced', async ($, on) => {
-  // One request of 10K input and 10K output: (10K × 0.10 + 10K × 0.50) / 1M = 0.006
-  await worker($, on, 'claude-haiku-5-5', { input_tokens: 10_000, output_tokens: 10_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 })
-  await step($, 'claude-haiku-5-5')
-  await complete($, 'claude-haiku-5-5', TURN)
-  expect(await shows($, /≈\$0\.01 /)).toBeDefined()
-})
-
-// Haiku 5.5 is priced by prompt length, per request: 120K of prompt is over the 100K line.
+// 130K tokens: 20K input, 10K output, 50K cache read, 50K cache write.
 const LONG: Usage = { input_tokens: 20_000, output_tokens: 10_000, cache_read_input_tokens: 50_000, cache_creation_input_tokens: 50_000 }
 
-test('cost: a Haiku 5.5 request over 100K prompt tokens pays the long-prompt prices', async ($, on) => {
-  await worker($, on, 'claude-haiku-5-5', LONG)
-  await step($, 'claude-haiku-5-5')
-  // (20K × 0.50 + 10K × 2.50 + 50K × 0.05 + 50K × 1.00) / 1M = 0.0875; at the short-prompt prices it is 0.0175.
-  expect(await shows($, /≈\$0\.09 /)).toBeDefined()
-})
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`${surface}: the header shows the chat's total cost as the engine counts it`, async ($, on) => {
+    await worker($, on, 'claude-opus-5-5', LONG, 4.82)
+    const shown = await texts($, surface)
+    expect(shown).toContain('$4.82')
+    expect(shown).not.toContain('≈')
+  })
 
-test('cost: Haiku 4.5 has one price whatever the prompt length', async ($, on) => {
-  await worker($, on, 'claude-haiku-4-5', LONG)
-  await step($, 'claude-haiku-4-5')
-  // (20K × 1 + 10K × 5 + 50K × 0.10 + 50K × 2) / 1M = 0.175
-  expect(await shows($, /≈\$0\.1[78] /)).toBeDefined()
+  test(`${surface}: with no ledger the chat cost shows —`, async ($, on) => {
+    await worker($, on, 'claude-opus-5-5', LONG)
+    expect(await texts($, surface)).toMatch(/Total chat cost (—|<)/)
+  })
+}
+
+// Rows carry no cost of their own: only tokens, time and the context fill.
+test('rows show tokens and the context fill, and no amount', async ($, on) => {
+  await worker($, on, 'claude-opus-5-5', LONG, 4.82)
+  const shown = await texts($, 'terminal')
+  expect(shown).toMatch(/ctx 13% · 130k tokens · \d+:\d\d/)
+  expect(shown.match(/\$/g)?.length).toBe(1) // the header's total only
 })
 
 // The context bar: 130K tokens are 13% of Haiku 5.5's 1M window and 65% of Haiku 4.5's 200K.
-for (const [model, percent] of [['claude-haiku-5-5', 13], ['claude-haiku-4-5', 65]] as const) {
+for (const [model, percent] of [['claude-haiku-5-5', 13], ['claude-haiku-4-5', 65], ['claude-haiku-4-5-20251001', 65], ['claude-opus-5-5[1m]', 13]] as const) {
   test(`context: ${model} fills to ${percent}% at 130K tokens`, async ($, on) => {
     await worker($, on, model, LONG)
-    await step($, model)
-    expect(await shows($, new RegExp(`ctx ${percent}% `))).toBeDefined()
+    expect(await texts($, 'terminal')).toMatch(new RegExp(`ctx ${percent}% `))
   })
 }
+
+test('context: a model missing from the window table is computed against 1M and marked ?', async ($, on) => {
+  await worker($, on, 'claude-opus-9', { ...LONG, input_tokens: 10_000 }) // 120K
+  const shown = await texts($, 'desktop')
+  expect(shown).toContain('ctx 12%?')
+  expect(shown).toContain('window unknown, computed against 1M tokens')
+})

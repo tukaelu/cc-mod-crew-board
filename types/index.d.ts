@@ -32,8 +32,6 @@ export type AgentRun = {
   endedAt?: number
   contextTokens: number
   tokens: number
-  /** null once any of the run's usage was on a model the price table lacks. */
-  costUsd: number | null
   steps: number
   round: number
   /** The context-fill toast was shown for this run. */
@@ -41,7 +39,8 @@ export type AgentRun = {
   /** Self-reported by the subagent through the `step` tool. */
   stepDone?: number
   stepTotal?: number
-  stepNote?: string
+  /** The latest step notes, oldest first; the last is the current one. */
+  stepNotes?: string[]
 }
 
 export type Panel = {
