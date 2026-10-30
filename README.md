@@ -12,9 +12,19 @@ A Claude Code mod that shows the plan and the subagents working on it: a progres
 
 Cost is an estimate from token counts and a built-in price table (`PRICES` in `hooks/register.tsx`, list prices as of 2026-10). Only a model whose id, version included, is in the table is priced; any other shows `—`, and the panel's total then carries a `+` as a floor.
 
+## Install
+
+```
+/plugin install crew-board --marketplace tukaelu/cc-mod-crew-board
+```
+
+## Step reports
+
+Each subagent's brief gets one request at its end to report steps with `mcp__crew-board__step`, and a line saying to skip it silently if the tool is missing. It is added only to built-in agents and your own agents (types without `:`), never to a plugin's agents (`plugin:agent`), and not to an agent whose file in `.claude/agents/` or `~/.claude/agents/` gives `tools:` without the step tool. `stepInclude` adds plugin agent types; `stepExclude` (default `Explore`) removes any type, such as agents from `--agents` or managed settings.
+
 ## Settings
 
-Set in `/config`: `language` (`auto`, `en`, `ja`) and `autoOpen` (`plan`, `any`).
+Set in `/config`: `language` (`auto`, `en`, `ja`), `autoOpen` (`plan`, `any`), `stepInclude` and `stepExclude` (comma-separated agent types).
 
 ## License
 

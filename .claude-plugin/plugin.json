@@ -20,6 +20,18 @@
       "description": "plan: when a plan is reported; any: also when any subagent starts",
       "default": "plan",
       "options": ["plan", "any"]
+    },
+    "stepInclude": {
+      "type": "string",
+      "title": "Ask these plugin agents for steps",
+      "description": "Comma-separated agent types with a \":\" (plugin agents) whose brief still gets the step request",
+      "default": ""
+    },
+    "stepExclude": {
+      "type": "string",
+      "title": "Never ask these agents for steps",
+      "description": "Comma-separated agent types whose brief never gets the step request",
+      "default": "Explore"
     }
   },
   "license": "MIT"

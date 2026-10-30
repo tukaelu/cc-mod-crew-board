@@ -14,6 +14,12 @@ const now = atom({ plugin: 'crew-board', key: 'now' } as const, 0)
 
 const TOOL = 'mcp__crew-board__progress'
 const STEP_TOOL = 'mcp__crew-board__step'
+// Added to the end of a subagent's brief. A request worded as a condition ("if the
+// step tool appears among your tools") is skipped even with the tool listed, so the
+// request itself is unconditional; the last sentence covers an agent that lacks it.
+const STEP_BRIEF = `
+
+Progress reporting: before any other work, call \`${STEP_TOOL}\` with \`total\` (your plan in 3-8 steps) and \`done: 0\`; call it again with \`done\` and a few-word \`note\` as each step finishes. It only draws a progress bar. If you cannot find this tool, skip this silently.`
 const PANE = 'crew-agents'
 // The tools' schemas are advice to the model, not a check: what a call may ask
 // the band and the panel to draw is bounded here.
@@ -642,6 +648,94 @@ async function togglePane($: EngineInterface): Promise<boolean> {
   return true
 }
 
+// --- step brief: which subagents are asked to report steps.
+
+// `stepInclude` / `stepExclude` are comma-separated type names.
+const typeList = (v: unknown): string[] =>
+  typeof v === 'string'
+    ? v
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean)
+    : []
+
+// The frontmatter keys an agent file gives as a list: `tools: Read, Grep`,
+// `tools: [Read, Grep]` or a YAML list on the lines below the key.
+type Frontmatter = { name?: string; tools?: string[]; disallowedTools?: string[] }
+
+const parseFrontmatter = (text: string): Frontmatter | null => {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)
+  if (!m) return null
+  const out: Frontmatter = {}
+  let key = ''
+  for (const line of (m[1] ?? '').split(/\r?\n/)) {
+    const item = /^\s+-\s*(.+)$/.exec(line)
+    if (item && (key === 'tools' || key === 'disallowedTools')) {
+      ;(out[key] ??= []).push(unquote(item[1] ?? ''))
+      continue
+    }
+    const kv = /^([A-Za-z]+):\s*(.*)$/.exec(line)
+    if (!kv) continue
+    key = kv[1] ?? ''
+    const value = (kv[2] ?? '').trim()
+    if (key === 'name') out.name = unquote(value)
+    if (key === 'tools' || key === 'disallowedTools') {
+      out[key] = value
+        .replace(/^\[|\]$/g, '')
+        .split(',')
+        .map(unquote)
+        .filter(Boolean)
+    }
+  }
+  return out
+}
+
+const unquote = (s: string): string => s.trim().replace(/^["']|["']$/g, '')
+
+// Where Claude Code looks for agent files, the project's first: the
+// definition there wins over the user's of the same name.
+async function agentFile($: EngineInterface, type: string): Promise<Frontmatter | null> {
+  const home = await $.env.get('HOME').catch(() => undefined)
+  for (const dir of ['.claude/agents', ...(home ? [`${home}/.claude/agents`] : [])]) {
+    let entries: { name: string }[] = []
+    try {
+      entries = await $.fs.list(dir)
+    } catch {
+      continue
+    }
+    for (const entry of entries.filter(x => x.name.endsWith('.md'))) {
+      try {
+        const fm = parseFrontmatter(await $.fs.read(`${dir}/${entry.name}`))
+        if (fm?.name === type) return fm
+      } catch {
+        // An unreadable file names no agent we can check.
+      }
+    }
+  }
+  return null
+}
+
+const namesStep = (tool: string): boolean => tool === STEP_TOOL || tool === 'mcp__crew-board' || tool === 'mcp__crew-board__*'
+
+// An agent file whose `tools:` leaves the step tool out, or whose
+// `disallowedTools:` names it, would get a request it cannot follow.
+const fileAllowsStep = (fm: Frontmatter): boolean => {
+  if (fm.disallowedTools?.some(namesStep)) return false
+  if (fm.tools?.length && !fm.tools.some(t => namesStep(t) || t === '*')) return false
+  return true
+}
+
+// Built-in and the person's own agent types (no ":") are asked; a plugin's
+// (`plugin:agent`, a name an agent file cannot have) are someone else's and left
+// alone, unless `stepInclude` names them. `stepExclude` stops any type.
+async function shouldBrief($: EngineInterface, type: string, prompt: string, options: Record<string, unknown>): Promise<boolean> {
+  if (prompt.includes(STEP_TOOL)) return false
+  if (typeList(options.stepExclude ?? 'Explore').includes(type)) return false
+  if (type.includes(':') && !typeList(options.stepInclude).includes(type)) return false
+  const fm = await agentFile($, type)
+  return !fm || fileAllowsStep(fm)
+}
+
 async function autoOpen($: EngineInterface, key: string): Promise<void> {
   const p = await read($, panel)
   if (p.autoOpenedFor === key) return
@@ -781,7 +875,9 @@ export const register: Register = (on, options) => {
   })
 
   on('agent.spawn', async ($, e, next) => {
-    const started = await next(e)
+    // A resumed run or a workflow agent keeps the prompt it has.
+    const isBriefed = !e.resume && !e.workflow && (await shouldBrief($, e.subagentType, e.prompt, options))
+    const started = await next(isBriefed ? { ...e, prompt: e.prompt + STEP_BRIEF } : e)
     if (started.deny !== undefined) return started
 
     const at = await $.clock.now()
