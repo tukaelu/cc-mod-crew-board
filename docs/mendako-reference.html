@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mendako Reference</title>
+<!--
+  crew-board マスコット（メンダコ）の参照実装。
+  - 要件検討時に描いたサンプルを1ファイルにまとめたもの。実装ではこのデータと CSS を正として移植する。
+  - 座標系: 22×16 マスのキャンバス。rect は [x, y, 幅, 高さ, 色] の絶対座標。
+  - 胴体は BODY.origin を原点とする相対配置。ヒレと脚も相対座標。
+  - accent（お腹の帯）は、実装では subagent_type のハッシュ色に置き換える。ここでの衣装ごとの色は見本用。
+  - 右上の状態マーク（● ✓ ✗ 時計）はスプライトの外、行の SVG 側に描く（ベースの statusMark と同じ）。
+  - アニメーションはすべて CSS。.run の下でだけ動き、prefers-reduced-motion ではすべて止まる。
+-->
+<style>
+:root{--bg:#faf9f6;--card:#ffffff;--line:#e4e2dc;--text:#1f1e1d;--muted:#6b6b68}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#1c1c1b;--card:#262625;--line:#3a3a38;--text:#ececec;--muted:#a8a8a4}}
+:root[data-theme="dark"]{--bg:#1c1c1b;--card:#262625;--line:#3a3a38;--text:#ececec;--muted:#a8a8a4}
+body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Segoe UI",sans-serif;line-height:1.6}
+main{max-width:880px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:22px;font-weight:600;margin:0 0 4px}
+h2{font-size:17px;font-weight:600;margin:32px 0 8px}
+p,li{color:var(--muted);font-size:14px}
+.grid{display:grid;gap:6px;align-items:center}
+.g5{grid-template-columns:96px repeat(4,1fr)}
+.g6{grid-template-columns:96px repeat(5,1fr)}
+.h{font-size:12px;color:var(--muted);text-align:center}
+.r{font-size:13px}
+.r small{display:block;color:var(--muted);font-size:11px}
+.c{background:var(--card);border:1px solid var(--line);border-radius:8px;display:flex;justify-content:center;padding:6px 0}
+.c svg{width:100%;max-width:110px;height:auto}
+@media (max-width:560px){.g5,.g6{grid-template-columns:64px repeat(4,1fr)}.g6{grid-template-columns:64px repeat(5,1fr)}}
+
+/* ---- スプライトのアニメーション（移植対象） ---- */
+.run g{transform-box:fill-box}
+.run .la{animation:cb-step .5s steps(1) infinite}
+.run .lb{animation:cb-step .5s steps(1) infinite -.25s}
+.run .bd{animation:cb-bob .5s steps(1) infinite -.125s}
+.run .fin{animation:cb-step .25s steps(1) infinite}
+.run .p-scan{animation:cb-scan 1s steps(1) infinite}
+.run .p-pen{animation:cb-pen .5s steps(1) infinite}
+.run .p-swing{transform-origin:50% 100%;animation:cb-swing .5s steps(1) infinite}
+.run .p-smoke{animation:cb-up 1.5s steps(5) infinite}
+.run .p-twinkle{animation:cb-tw .5s steps(1) infinite}
+.run .p-bob{animation:cb-step .5s steps(1) infinite -.25s}
+.run .kelp-a{animation:cb-a .8s steps(1) infinite}
+.run .kelp-b{animation:cb-b .8s steps(1) infinite}
+.run .sparkle{animation:cb-tw .5s steps(1) infinite}
+.zz{animation:cb-tw 1.2s steps(1) infinite}
+@keyframes cb-step{50%{transform:translateY(-1px)}}
+@keyframes cb-bob{50%{transform:translateY(1px)}}
+@keyframes cb-scan{25%{transform:translate(-1px,1px)}50%{transform:translate(-2px,2px)}75%{transform:translate(-1px,1px)}}
+@keyframes cb-pen{50%{transform:translateX(-1px)}}
+@keyframes cb-swing{50%{transform:rotate(-50deg)}}
+@keyframes cb-up{0%{transform:translateY(0);opacity:1}100%{transform:translateY(-4px);opacity:0}}
+@keyframes cb-tw{50%{opacity:.15}}
+@keyframes cb-a{50%{opacity:0}}
+@keyframes cb-b{0%{opacity:0}50%{opacity:1}}
+@media (prefers-reduced-motion: reduce){.run *,.zz{animation:none!important}.run .kelp-b{opacity:0}}
+</style>
+</head>
+<body>
+<main>
+<h1>メンダコ参照</h1>
+<p>crew-board のマスコットの見本と、移植用のピクセルデータ・CSS アニメーションです。データは下の script 内の <code>MENDAKO</code> にあります。</p>
+
+<h2>衣装 × 状態</h2>
+<p>effort は high（海藻 6 マス）で表示。待機（Planned）は海藻なし。</p>
+<div class="grid g5" id="states">
+  <div></div><div class="h">作業中</div><div class="h">完了</div><div class="h">失敗</div><div class="h">待機</div>
+</div>
+
+<h2>effort × 海藻（作業中）</h2>
+<div class="grid g6" id="effort">
+  <div></div><div class="h">low</div><div class="h">medium</div><div class="h">high</div><div class="h">xhigh</div><div class="h">max</div>
+</div>
+
+<h2>移植時の注意</h2>
+<ul>
+  <li>失敗時は小道具（prop）を描かない。帽子と眼鏡は残す。完了時は小道具を静止状態で描く。</li>
+  <li>待機時は全体を opacity 0.5 にし、帽子は残し、小道具と海藻は描かない。Zz だけが点滅する。</li>
+  <li>完了・失敗時の海藻は 1 コマ目で静止。作業中だけ 2 コマで揺れる。</li>
+  <li>描画順: 海藻 → 胴体グループ（胴体、ヒレ、帽子、目、小道具、汗）→ 脚 A → 脚 B。</li>
+  <li>ハンマー（p-swing）は小道具グループの下端中央を支点に回転する。</li>
+</ul>
+</main>
+
+<script>
+/* ===== 移植用データ（MENDAKO） ===== */
+const C = {
+  body: '#E8836A', fin: '#D06A55', blush: '#F5B3A0', leg: '#C85A48', eye: '#1F1E1D',
+  sweat: '#7FB8E8', zz: '#9A9A96', gold: '#F5C542',
+  ring: '#4A4A48', glass: '#A9D6F5', wood: '#7A4A26', metal: '#8E929A', dark: '#2A2A2A',
+  kelp1: '#3E9B5A', kelp2: '#2E7A44', sand: '#D8C27A',
+};
+
+const MENDAKO = {
+  canvas: [22, 16],
+  body: {
+    origin: [1, 5],
+    // m: 体, p: 頬, k: 目（作業中のみ点。それ以外は state の目で上書き）, a: accent（型の色）
+    rows: [
+      '....mmmmmm....',
+      '...mmmmmmmm...',
+      '..mmmmmmmmmm..',
+      '..mmkmmmmkmm..',
+      '.mmpmmmmmmpmm.',
+      '.mmmmaaaammmm.',
+      'mmmmmmmmmmmmmm',
+    ],
+  },
+  // 相対座標。右側は x を 13 - x に反転する
+  fins: {
+    normal: [[1, -1], [2, -1], [0, 0], [1, 0], [2, 0], [1, 1]],
+    fail: [[1, 2], [0, 2], [0, 3]],
+  },
+  legs: { A: [[0, 7], [4, 7], [8, 7], [12, 7]], B: [[2, 7], [6, 7], [10, 7], [13, 7]] },
+  eyes: [[5, 8], [10, 8]], // 絶対座標
+  stateEyes: {
+    done: ([x, y]) => [[x - 1, y, 1, 1], [x, y - 1, 1, 1], [x + 1, y, 1, 1]],                              // ^ 形
+    fail: ([x, y]) => [[x - 1, y - 1, 1, 1], [x + 1, y - 1, 1, 1], [x, y, 1, 1], [x - 1, y + 1, 1, 1], [x + 1, y + 1, 1, 1]], // × 形
+    wait: ([x, y]) => [[x - 1, y, 2, 1]],                                                                  // 閉じた目
+  },
+  sweat: [[2, 4, 1, 2, C.sweat]],
+  zz: [[14, 0, 4, 1, C.zz], [16, 1, 1, 1, C.zz], [15, 2, 1, 1, C.zz], [14, 3, 4, 1, C.zz]], // Z 字
+  waitOpacity: 0.5,
+  seaweed: {
+    heights: { low: 2, medium: 4, high: 6, xhigh: 8, max: 10 },
+    baseX: 18, bottomY: 12, width: 2,
+    sand: [17, 13, 5, 1, C.sand],
+    maxSparkle: [[21, 1, 1, 1, C.gold], [17, 2, 1, 1, C.gold]],
+  },
+  // 衣装。hat は全状態で描く。prop.still は静止部分、prop.anim は動く部分（class 名と遅延）
+  costumes: {
+    explorer: {
+      label: '探検家', match: 'Explore', accent: '#1D9E75',
+      hat: [[6, 2, 4, 1, '#C8A96B'], [6, 3, 4, 1, '#8A6A3A'], [4, 4, 8, 1, '#B0925A']],
+      prop: { still: [], anim: [{ cls: 'p-scan', delay: 0, px: [
+        [15, 8, 3, 1, C.ring], [15, 10, 3, 1, C.ring], [15, 9, 1, 1, C.ring], [17, 9, 1, 1, C.ring], [16, 9, 1, 1, C.glass], [16, 11, 1, 1, C.wood]] }] },
+    },
+    planner: {
+      label: '設計士', match: 'Plan', accent: '#7F77DD',
+      hat: [[8, 2, 1, 1, '#3A3F6E'], [6, 3, 5, 1, '#3A3F6E'], [5, 4, 7, 1, '#3A3F6E'],
+        [4, 7, 3, 1, C.dark], [4, 9, 3, 1, C.dark], [4, 8, 1, 1, C.dark], [6, 8, 1, 1, C.dark],
+        [9, 7, 3, 1, C.dark], [9, 9, 3, 1, C.dark], [9, 8, 1, 1, C.dark], [11, 8, 1, 1, C.dark],
+        [7, 8, 2, 1, C.dark]],
+      prop: { still: [[15, 11, 3, 2, '#F4F3EE'], [15, 12, 3, 1, '#CFE0FA']], anim: [{ cls: 'p-pen', delay: 0, px: [
+        [16, 7, 1, 1, '#E8A0A0'], [16, 8, 1, 2, '#F2C14E'], [16, 10, 1, 1, '#3A3A3A']] }] },
+    },
+    carpenter: {
+      label: '大工', match: 'general-purpose', accent: '#378ADD',
+      hat: [[7, 1, 2, 1, C.gold], [5, 2, 6, 1, C.gold], [5, 3, 6, 1, C.gold], [7, 1, 1, 3, '#FBE08A'], [4, 4, 8, 1, '#C99A1E']],
+      prop: { still: [], anim: [{ cls: 'p-swing', delay: 0, px: [[14, 7, 3, 1, C.metal], [15, 8, 1, 4, C.wood]] }] },
+    },
+    detective: {
+      label: '探偵', match: 'research / investigate / deep', accent: '#2BA3B8',
+      hat: [[6, 2, 4, 1, '#8A6A3A'], [7, 2, 1, 1, '#A0703F'], [9, 2, 1, 1, '#A0703F'], [5, 3, 6, 1, '#8A6A3A'],
+        [6, 3, 1, 1, '#A0703F'], [8, 3, 1, 1, '#A0703F'], [10, 3, 1, 1, '#A0703F'], [4, 4, 8, 1, '#5A3519']],
+      prop: { still: [[14, 10, 2, 1, '#5A3519'], [16, 8, 2, 2, '#5A3519'], [16, 8, 1, 1, '#E8604A']], anim: [
+        { cls: 'p-smoke', delay: 0, px: [[16, 6, 1, 1, '#C8C8C4']] },
+        { cls: 'p-smoke', delay: -0.5, px: [[17, 5, 1, 1, '#C8C8C4']] },
+        { cls: 'p-smoke', delay: -1, px: [[16, 4, 1, 1, '#C8C8C4']] }] },
+    },
+    wizard: {
+      label: '魔法使い', match: 'review / audit', accent: '#D4537E',
+      hat: [[8, 0, 1, 1, '#6A4FB0'], [7, 1, 2, 1, '#6A4FB0'], [7, 2, 3, 1, '#6A4FB0'], [6, 3, 4, 1, '#6A4FB0'], [4, 4, 8, 1, '#4A3590'], [8, 2, 1, 1, C.gold]],
+      prop: { still: [[15, 9, 1, 1, C.wood], [16, 8, 1, 1, C.wood], [17, 7, 1, 1, C.gold]], anim: [{ cls: 'p-twinkle', delay: 0, px: [
+        [17, 5, 1, 1, C.gold], [15, 6, 1, 1, C.gold], [17, 9, 1, 1, '#FFF3C4']] }] },
+    },
+    mail: {
+      label: '郵便屋', match: 'handoff / deliver', accent: '#BA7517',
+      hat: [[5, 3, 6, 1, '#3A6EA5'], [5, 4, 6, 1, '#3A6EA5'], [11, 4, 1, 1, '#2A5080'], [7, 3, 1, 1, C.gold]],
+      prop: { still: [], anim: [{ cls: 'p-bob', delay: 0, px: [
+        [15, 9, 3, 2, '#F4F3EE'], [15, 9, 1, 1, '#D8D7D2'], [16, 10, 1, 1, '#D8D7D2'], [17, 9, 1, 1, '#D0453F']] }] },
+    },
+    none: { label: '衣装なし', match: 'その他', accent: '#888780', hat: [], prop: { still: [], anim: [] } },
+  },
+};
+
+/* ===== 描画（見本用。実装では mod の描画関数に置き換える） ===== */
+const R = ([x, y, w, h, c]) => `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${c}"/>`;
+const rects = list => list.map(R).join('');
+const rel = (pts, color) => pts.map(([x, y]) => R([x + MENDAKO.body.origin[0], y + MENDAKO.body.origin[1], 1, 1, color])).join('');
+const mirror = pts => pts.map(([x, y]) => [13 - x, y]);
+
+function kelp(h, phase) {
+  const s = MENDAKO.seaweed;
+  let out = '';
+  for (let i = 0; i < h; i++) {
+    const off = (Math.floor(i / 2) + phase) % 2;
+    out += R([s.baseX + off, s.bottomY - i, s.width, 1, i % 2 ? C.kelp2 : C.kelp1]);
+  }
+  return out;
+}
+
+function sprite(costumeKey, state, effort) {
+  const M = MENDAKO, cos = M.costumes[costumeKey];
+  const [ox, oy] = M.body.origin;
+  const run = state === 'run';
+  let body = '';
+  M.body.rows.forEach((row, dy) => [...row].forEach((ch, dx) => {
+    const color = { m: C.body, p: C.blush, a: cos.accent, k: run ? C.eye : C.body }[ch];
+    if (color) body += R([dx + ox, dy + oy, 1, 1, color]);
+  }));
+  const fins = state === 'fail'
+    ? rel(M.fins.fail, C.fin) + rel(mirror(M.fins.fail), C.fin)
+    : `<g class="fin">${rel(M.fins.normal, C.fin)}${rel(mirror(M.fins.normal), C.fin)}</g>`;
+  const eyes = M.stateEyes[state] ? M.eyes.flatMap(M.stateEyes[state]).map(([x, y, w, h]) => R([x, y, w, h, C.eye])).join('') : '';
+  let props = '';
+  if (run || state === 'done') {
+    props += rects(cos.prop.still);
+    props += cos.prop.anim.map(a => `<g class="${a.cls}" style="animation-delay:${a.delay}s">${rects(a.px)}</g>`).join('');
+  }
+  const sweat = state === 'fail' ? rects(M.sweat) : '';
+  const legs = `<g class="la">${rel(M.legs.A, C.leg)}</g><g class="lb">${rel(M.legs.B, C.leg)}</g>`;
+  let weed = '';
+  if (effort && state !== 'wait') {
+    const h = M.seaweed.heights[effort];
+    weed = R(M.seaweed.sand) + (run ? `<g class="kelp-a">${kelp(h, 0)}</g><g class="kelp-b">${kelp(h, 1)}</g>` : kelp(h, 0));
+    if (effort === 'max') weed += `<g class="sparkle">${rects(M.seaweed.maxSparkle)}</g>`;
+  }
+  let s = `${weed}<g class="bd">${body}${fins}${rects(cos.hat)}${eyes}${props}${sweat}</g>${legs}`;
+  if (run) s = `<g class="run">${s}</g>`;
+  if (state === 'wait') s = `<g opacity="${M.waitOpacity}">${s}</g><g class="zz">${rects(M.zz)}</g>`;
+  const [w, h] = M.canvas;
+  return `<svg viewBox="0 0 ${w} ${h}" width="110" height="80" shape-rendering="crispEdges" role="img" aria-label="${cos.label} ${state}">${s}</svg>`;
+}
+
+const cell = html => { const d = document.createElement('div'); d.className = 'c'; d.innerHTML = html; return d; };
+const label = (text, sub) => { const d = document.createElement('div'); d.className = 'r'; d.innerHTML = `${text}<small>${sub}</small>`; return d; };
+
+const states = document.getElementById('states');
+for (const [key, cos] of Object.entries(MENDAKO.costumes)) {
+  states.appendChild(label(cos.label, cos.match));
+  for (const st of ['run', 'done', 'fail', 'wait']) states.appendChild(cell(sprite(key, st, 'high')));
+}
+
+const effort = document.getElementById('effort');
+for (const key of ['none', 'carpenter']) {
+  effort.appendChild(label(MENDAKO.costumes[key].label, MENDAKO.costumes[key].match));
+  for (const lv of ['low', 'medium', 'high', 'xhigh', 'max']) effort.appendChild(cell(sprite(key, 'run', lv)));
+}
+</script>
+</body>
+</html>

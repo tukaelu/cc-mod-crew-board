@@ -1,0 +1,26 @@
+{
+  "name": "crew-board",
+  "version": "0.1.0",
+  "description": "Plan and subagent progress above the prompt, plus a crew panel (/crew): running, finished and planned subagents with model, effort, steps, context, cost and time.",
+  "author": {
+    "name": "Tsukasa Nishiyama"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "language": {
+      "type": "string",
+      "title": "Language",
+      "description": "auto follows Claude Code's language setting, then the system locale, then English",
+      "default": "auto",
+      "options": ["auto", "en", "ja"]
+    },
+    "autoOpen": {
+      "type": "string",
+      "title": "Open the crew panel",
+      "description": "plan: when a plan is reported; any: also when any subagent starts",
+      "default": "plan",
+      "options": ["plan", "any"]
+    }
+  },
+  "license": "MIT"
+}
