@@ -34,6 +34,12 @@
       "description": "Show a toast once per subagent when its context fill goes over this percentage",
       "default": 80
     },
+    "tokenBudget": {
+      "type": "number",
+      "title": "Token budget per subagent",
+      "description": "Tokens one subagent may use before its token bar turns yellow (75%) and red (100%); 0 compares runs with each other and never warns",
+      "default": 0
+    },
     "stepInclude": {
       "type": "string",
       "title": "Ask these plugin agents for steps",

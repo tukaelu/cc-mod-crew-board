@@ -96,12 +96,12 @@ const rowOf = async ($: Engine, description: string) => {
 
 test('mascot: panel rows wear the costume of their type', async ($, on) => {
   engine(on)
-  for (const [type, d] of [['Explore', 'Scout'], ['deep-researcher', 'Dig'], ['test-runner', 'Run']]) {
+  for (const [type, d] of [['Explore', 'Scout'], ['deep-researcher', 'Dig'], ['test-runner', 'Tester']]) {
     await $.agent.spawn({ tool_use_id: d, prompt: 'p', description: d, subagentType: type, provider: 'engine', parentModel: 'm', background: false, fork: false } as never)
   }
   expect(await rowOf($, 'Scout')).toContain('fill="#C8A96B"') // explorer's hat
   expect(await rowOf($, 'Dig')).toContain('class="p-smoke"') // detective's pipe
-  const plain = await rowOf($, 'Run')
+  const plain = await rowOf($, 'Tester')
   expect(plain).not.toContain('class="p-')
   expect(plain).toContain('class="run"')
 })

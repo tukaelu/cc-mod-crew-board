@@ -77,7 +77,7 @@ test('link: "#N " ties a run to task N and comes off the title', async ($, on) =
   expect(shown).not.toContain('#2 Hook up')
   expect(shown).toMatch(/#2 · general-purpose/)
   // Task 2 has started: only 1 and 3 are still planned.
-  expect(shown).toContain('Planned · 2')
+  expect(shown).toContain('Planned 2')
   expect(shown).toMatch(/1\. Write the parser/)
   expect(shown).not.toMatch(/2\. Wire the CLI/)
   expect(shown).toMatch(/after 1, 2/)
@@ -140,8 +140,8 @@ test('step: a subagent reports on its own row only; the main session cannot', as
   expect(shown).toContain('Step 3 · writing')
   expect(shown.match(/^ +reading$/gm)?.length).toBe(1)
   expect(shown).not.toContain('3/3')
-  // The row of a1 has no steps: its line starts at the context.
-  expect(shown).toMatch(/░ ctx 0%/)
+  // The row of a1 has no steps: no step line, only its meters.
+  expect(shown).toMatch(/ctx ░+ 0%/)
 })
 
 test('step: a working row lists the notes before the current one newest first; a done row oldest first', async ($, on) => {
@@ -166,7 +166,7 @@ test('failure: a run that ends other than with an answer is finished with ✗ an
   await end($, 'a1', 'error')
   await end($, 'a1', 'error')
   const shown = await texts($)
-  expect(shown).toContain('Finished · 1')
+  expect(shown).toContain('Finished 1')
   expect(shown).toContain('✗')
   expect(toasts).toEqual(['Subagent failed: Fragile'])
 })

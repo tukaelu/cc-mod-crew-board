@@ -53,7 +53,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
 test('rows show tokens and the context fill, and no amount', async ($, on) => {
   await worker($, on, 'claude-opus-5-5', LONG, 4.82)
   const shown = await texts($, 'terminal')
-  expect(shown).toMatch(/ctx 13% · 130k tokens · \d+:\d\d/)
+  expect(shown).toMatch(/ctx [█░]+ 13% {2}tokens [█░]+ 130k · \d+:\d\d/)
   expect(shown.match(/\$/g)?.length).toBe(1) // the header's total only
 })
 
@@ -61,7 +61,7 @@ test('rows show tokens and the context fill, and no amount', async ($, on) => {
 for (const [model, percent] of [['claude-haiku-5-5', 13], ['claude-haiku-4-5', 65], ['claude-haiku-4-5-20251001', 65], ['claude-opus-5-5[1m]', 13]] as const) {
   test(`context: ${model} fills to ${percent}% at 130K tokens`, async ($, on) => {
     await worker($, on, model, LONG)
-    expect(await texts($, 'terminal')).toMatch(new RegExp(`ctx ${percent}% `))
+    expect(await texts($, 'terminal')).toMatch(new RegExp(`ctx [█░]+ ${percent}% `))
   })
 }
 
@@ -70,4 +70,54 @@ test('context: a model missing from the window table is computed against 1M and 
   const shown = await texts($, 'desktop')
   expect(shown).toContain('ctx 12%?')
   expect(shown).toContain('window unknown, computed against 1M tokens')
+})
+
+// The card of the run, on the desktop.
+const card = async ($: Engine) => {
+  const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'Pane', requestId: 'crew-agents', props: pane })
+  const svg = (await ui.findAll({ type: 'Svg' })).find(el => String(el.props.alt).startsWith('Work'))
+  await ui.unmount()
+  return String(svg?.props.source)
+}
+
+const CAUTION = '#E0A419'
+const OVER = '#D0453F'
+
+test('meters: the context turns yellow past three quarters of contextWarnPercent, red past it', async ($, on) => {
+  await worker($, on, 'claude-haiku-4-5', LONG) // 65% of 200K; 80% × 3/4 = 60%
+  const s = await card($)
+  expect(s).toContain(`fill="${CAUTION}"`)
+  expect(s).not.toContain(`fill="${OVER}"`)
+})
+
+test('meters: past contextWarnPercent the context is red', { options: { contextWarnPercent: 50 } }, async ($, on) => {
+  await worker($, on, 'claude-haiku-4-5', LONG) // 65% > 50%
+  expect(await card($)).toContain(`fill="${OVER}"`)
+})
+
+test('meters: a low fill stays grey', async ($, on) => {
+  await worker($, on, 'claude-haiku-5-5', LONG) // 13%
+  const s = await card($)
+  expect(s).not.toContain(`fill="${CAUTION}"`)
+  expect(s).not.toContain(`fill="${OVER}"`)
+})
+
+test('meters: with no tokenBudget the tokens are compared, never warned', async ($, on) => {
+  await worker($, on, 'claude-haiku-5-5', { ...LONG, input_tokens: 2_000_000 })
+  const s = await card($)
+  expect(s).toContain('>2.1M<')
+  // One request this big overfills the context, so its meter is red; the tokens' is not.
+  expect(s.match(new RegExp(`fill="${OVER}"`, 'g'))?.length).toBe(1)
+})
+
+test('meters: past tokenBudget the tokens are red, and the budget is shown', { options: { tokenBudget: 100_000 } }, async ($, on) => {
+  await worker($, on, 'claude-haiku-5-5', LONG) // 130k of 100k
+  const s = await card($)
+  expect(s).toContain('130k / 100k')
+  expect(s).toContain(`fill="${OVER}"`)
+})
+
+test('meters: three quarters of tokenBudget is yellow', { options: { tokenBudget: 160_000 } }, async ($, on) => {
+  await worker($, on, 'claude-haiku-5-5', LONG) // 130k of 160k = 81%
+  expect(await card($)).toContain(`fill="${CAUTION}"`)
 })

@@ -485,26 +485,27 @@ const statusMark = (x: number, y: number, status: string, color: string): string
 const svg = (W: number, H: number, body: string, hasMascot = true): string =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${PANE_CSS}${hasMascot ? MASCOT_CSS : ''}${body}</svg>`
 
-// The header: the plan's name (or how many subagents there are), then the chat's
-// total cost, the subagents' tokens and their time.
-const headerSvg = (W: number, title: string, t: Totals): string => {
+// The header's first line: the plan's name, or how many subagents there are. The
+// compact toggle is a Button beside it, so this drawing leaves room for it.
+const TITLE_H = 36
+const TITLE_BUTTON_W = 72
+
+const titleSvg = (W: number, title: string): string =>
+  svg(W, TITLE_H, `<text x="2" y="23" fill="#D97757" font-family="${FONT}" font-size="14" font-weight="600">${xml(fitText(title, 14, W))}</text>`, false)
+
+// Under it: the chat's total cost, the subagents' tokens and their time.
+const TILES_H = 64
+
+const tilesSvg = (W: number, t: Totals): string => {
   const s = tr()
   const gap = 8
   const tw = (W - gap * 2) / 3
   const tile = (i: number, k: string, v: string) =>
-    `<rect class="tile" x="${i * (tw + gap) + 0.5}" y="28.5" width="${tw - 1}" height="47" rx="8"/>
-<text class="s" x="${i * (tw + gap) + 11}" y="47" font-family="${FONT}" font-size="11">${xml(fitText(k, 11, tw - 18))}</text>
-<text class="t" x="${i * (tw + gap) + 11}" y="66" font-family="${FONT}" font-size="15" font-weight="600" font-variant-numeric="tabular-nums">${v}</text>`
-  return svg(
-    W,
-    HEADER_H,
-    `<text x="0" y="16" fill="#D97757" font-family="${FONT}" font-size="14" font-weight="600">${xml(fitText(title, 14, W))}</text>
-${tile(0, s.cost, fmtChat(t.chatUsd))}${tile(1, s.tokens, fmtTokens(t.tokens))}${tile(2, s.time, fmtTime(t.time))}`,
-    false,
-  )
+    `<rect class="tile" x="${i * (tw + gap) + 0.5}" y="6.5" width="${tw - 1}" height="50" rx="10"/>
+<text class="s" x="${i * (tw + gap) + 12}" y="26" font-family="${FONT}" font-size="11">${xml(fitText(k, 11, tw - 20))}</text>
+<text class="t" x="${i * (tw + gap) + 12}" y="46" font-family="${FONT}" font-size="15" font-weight="600" font-variant-numeric="tabular-nums">${v}</text>`
+  return svg(W, TILES_H, `${tile(0, s.cost, fmtChat(t.chatUsd))}${tile(1, s.tokens, fmtTokens(t.tokens))}${tile(2, s.time, fmtTime(t.time))}`, false)
 }
-
-const HEADER_H = 84
 
 // The task's own progress when the subagent reports steps; a finished run is full.
 const progressOf = (a: AgentRun): number | null => {
@@ -550,61 +551,85 @@ const stepLines = (a: AgentRun): { head: string; notes: string[] } | null => {
 }
 
 // Card rows. The sprite draws three pixels per cell (66×48) in the card's left column.
-const PAD = 12
-const TEXT_X = 92
-const CARD_GAP = 8
+const PAD = 14
+const TEXT_X = 96
+const CARD_GAP = 10
 const LINE = 18
+const METER_GAP = 16
 
-// The meta line (type · model) and the stats (ctx · tokens · time) share a line
-// when both fit; in a narrow pane the stats move to a line of their own.
 const metaOf = (a: AgentRun): string =>
   `${a.taskNo ? `#${a.taskNo}  ` : ''}${[a.type, runModel(a), ...(a.round > 1 ? [`${tr().round} ${a.round}`] : [])].join(' · ')}`
 
-const statsOf = (a: AgentRun, at: number): string => `${fmtCtx(a)} · ${fmtTokens(a.tokens)} ${tr().tokensWord} · ${fmtTime(elapsed(a, at))}`
-
-const isStatsWrapped = (W: number, a: AgentRun, at: number): boolean =>
-  textWidth(metaOf(a), 11) + 12 + textWidth(statsOf(a, at), 11) > W - TEXT_X - PAD
-
-const cardHeight = (W: number, a: AgentRun, at: number): number => {
+// Title 30, meta 50, the two meters to 84; then the step lines and the progress bar.
+const cardHeight = (a: AgentRun): number => {
   const steps = stepLines(a)
-  return 62 + (isStatsWrapped(W, a, at) ? 16 : 0) + (steps ? 22 + steps.notes.length * LINE : 0) + PAD
+  return 84 + (steps ? 26 + steps.notes.length * LINE : 0) + (progressOf(a) === null ? 0 : 14) + PAD
 }
 
-const agentSvg = (W: number, a: AgentRun, at: number): string => {
-  const color = colorOf(a.type)
+// How full a meter is: `caution` from three quarters of its limit, `over` past it.
+type Level = 'ok' | 'caution' | 'over'
+const levelOf = (ratio: number): Level => (ratio > 1 ? 'over' : ratio > 0.75 ? 'caution' : 'ok')
+const LEVEL_COLOR = { caution: '#E0A419', over: '#D0453F' }
+
+// The two meters of a run. The context's limit is contextWarnPercent of its window.
+// Tokens have no limit of their own: against `tokenBudget` when one is set, else
+// against the run that used the most, and then never colored as a warning.
+type Limits = { warnPercent: number; tokenBudget: number; maxTokens: number }
+
+const metersOf = (a: AgentRun, l: Limits) => {
   const ctx = ctxOf(a)
-  const H = cardHeight(W, a, at)
+  const hasBudget = l.tokenBudget > 0
+  return {
+    ctx: { ratio: ctx.percent / 100, value: `${ctx.percent}%${ctx.isGuessed ? '?' : ''}`, level: levelOf(ctx.percent / l.warnPercent) },
+    tokens: {
+      ratio: hasBudget ? a.tokens / l.tokenBudget : l.maxTokens ? a.tokens / l.maxTokens : 0,
+      value: hasBudget ? `${fmtTokens(a.tokens)} / ${fmtTokens(l.tokenBudget)}` : fmtTokens(a.tokens),
+      level: hasBudget ? levelOf(a.tokens / l.tokenBudget) : ('ok' as Level),
+    },
+  }
+}
+
+// A small labeled meter: the label on the left, the value on the right, the bar under them.
+const meter = (x: number, y: number, w: number, label: string, value: string, ratio: number, fill: string): string =>
+  `<text class="s" x="${x}" y="${y}" font-family="${FONT}" font-size="11">${xml(label)}</text>
+<text class="t" x="${x + w}" y="${y}" text-anchor="end" font-family="${FONT}" font-size="11" font-weight="600" font-variant-numeric="tabular-nums">${xml(value)}</text>
+<rect class="k" x="${x}" y="${y + 6}" width="${w}" height="5" rx="2.5"/><rect x="${x}" y="${y + 6}" width="${Math.round(w * Math.max(0, Math.min(1, ratio)))}" height="5" rx="2.5" fill="${fill}"/>`
+
+const agentSvg = (W: number, a: AgentRun, at: number, limits: Limits): string => {
+  const s = tr()
+  const color = colorOf(a.type)
+  const m = metersOf(a, limits)
+  const H = cardHeight(a)
   const textW = W - TEXT_X - PAD
-  const stats = statsOf(a, at)
-  const isWrapped = isStatsWrapped(W, a, at)
-  const meta = metaOf(a)
+  const time = fmtTime(elapsed(a, at))
   const steps = stepLines(a)
   const progress = progressOf(a)
-  // Without reported steps the bar falls back to the context, drawn grey.
-  const fillW = Math.round(textW * (progress ?? ctx.percent / 100))
   const stepColor = STEP_COLOR[a.status]
-  let y = isWrapped ? 84 : 68
+  const meterW = (textW - METER_GAP) / 2
+  let y = 110
   const stepSvg = steps
     ? `<path d="M${TEXT_X + 5} ${y - 9}a5 5 0 1 0 0.01 0z" fill="none" stroke="${stepColor}" stroke-width="1.4"/><path d="M${TEXT_X + 5} ${y - 9}a5 5 0 0 0 0 10z" fill="${stepColor}"/>
 <text x="${TEXT_X + 16}" y="${y}" fill="${stepColor}" font-family="${FONT}" font-size="12.5" font-weight="600">${xml(fitText(steps.head, 12.5, textW - 16))}</text>
 ${steps.notes.map(n => `<text class="t" x="${TEXT_X + 16}" y="${(y += LINE)}" font-family="${FONT}" font-size="12">${xml(fitText(n, 12, textW - 16))}</text>`).join('')}`
     : ''
-  const barY = H - PAD - 3
+  const barY = H - PAD - 4
   return svg(
     W,
     H + CARD_GAP,
-    `<rect class="card${a.status === 'running' ? '' : ' ln'}" x="0.75" y="0.75" width="${W - 1.5}" height="${H - 1.5}" rx="10"${a.status === 'running' ? ` stroke="${color}" stroke-width="1.5"` : ''}/>
-${mascot(13, (H - 48) / 2, 3, a.type, stateOf(a.status), a.status === 'running', a.effort)}
-<text class="t" x="${TEXT_X}" y="26" font-family="${FONT}" font-size="14" font-weight="600">${xml(fitText(a.description || a.type, 14, textW - 20))}</text>
-${statusMark(W - PAD - 6, 21, a.status, color)}
-<text class="s" x="${TEXT_X}" y="45" font-family="${FONT}" font-size="11">${xml(fitText(meta, 11, isWrapped ? textW : textW - textWidth(stats, 11) - 12))}</text>
-${isWrapped ? `<text class="s" x="${TEXT_X}" y="61" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(fitText(stats, 11, textW))}</text>` : `<text class="s" x="${W - PAD}" y="45" text-anchor="end" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(stats)}</text>`}
+    `<rect class="card${a.status === 'running' ? '' : ' ln'}" x="0.75" y="0.75" width="${W - 1.5}" height="${H - 1.5}" rx="12"${a.status === 'running' ? ` stroke="${color}" stroke-width="1.5"` : ''}/>
+${mascot(15, (H - 48) / 2, 3, a.type, stateOf(a.status), a.status === 'running', a.effort)}
+<text class="t" x="${TEXT_X}" y="${PAD + 16}" font-family="${FONT}" font-size="14" font-weight="600">${xml(fitText(a.description || a.type, 14, textW - 22))}</text>
+${statusMark(W - PAD - 6, PAD + 10, a.status, color)}
+<text class="s" x="${TEXT_X}" y="${PAD + 36}" font-family="${FONT}" font-size="11">${xml(fitText(metaOf(a), 11, textW - textWidth(time, 11) - 12))}</text>
+<text class="s" x="${W - PAD}" y="${PAD + 36}" text-anchor="end" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${time}</text>
+${meter(TEXT_X, 70, meterW, s.ctx, m.ctx.value, m.ctx.ratio, m.ctx.level === 'ok' ? '#8A8A86' : LEVEL_COLOR[m.ctx.level])}
+${meter(TEXT_X + meterW + METER_GAP, 70, meterW, s.tokensWord, m.tokens.value, m.tokens.ratio, m.tokens.level === 'ok' ? color : LEVEL_COLOR[m.tokens.level])}
 ${stepSvg}
-<rect class="k" x="${TEXT_X}" y="${barY}" width="${textW}" height="3" rx="1.5"/><rect${progress === null ? ' class="m"' : ''} x="${TEXT_X}" y="${barY}" width="${fillW}" height="3" rx="1.5"${progress === null ? '' : ` fill="${color}"`}/>`,
+${progress === null ? '' : `<rect class="k" x="${TEXT_X}" y="${barY}" width="${textW}" height="4" rx="2"/><rect x="${TEXT_X}" y="${barY}" width="${Math.round(textW * progress)}" height="4" rx="2" fill="${color}"/>`}`,
   )
 }
 
-const PLANNED_H = 64
+const PLANNED_H = 76
 
 const plannedSvg = (W: number, p: Planned): string => {
   const color = colorOf(p.type)
@@ -613,11 +638,11 @@ const plannedSvg = (W: number, p: Planned): string => {
   return svg(
     W,
     PLANNED_H + CARD_GAP,
-    `<rect class="card ln" x="0.75" y="0.75" width="${W - 1.5}" height="${PLANNED_H - 1.5}" rx="10" stroke-dasharray="4 3"/>
-${mascot(13, (PLANNED_H - 48) / 2, 3, p.type, 'wait')}
-<text class="s" x="${TEXT_X}" y="27" font-family="${FONT}" font-size="14" font-weight="600">${xml(fitText(`${p.n}. ${p.title}`, 14, textW - 20))}</text>
-${statusMark(W - PAD - 6, 21, 'planned', color)}
-<text class="m" x="${TEXT_X}" y="46" font-family="${FONT}" font-size="11">${xml(fitText(meta, 11, textW))}</text>`,
+    `<rect class="card ln" x="0.75" y="0.75" width="${W - 1.5}" height="${PLANNED_H - 1.5}" rx="12" stroke-dasharray="4 3"/>
+${mascot(15, (PLANNED_H - 48) / 2, 3, p.type, 'wait')}
+<text class="s" x="${TEXT_X}" y="${PAD + 18}" font-family="${FONT}" font-size="14" font-weight="600">${xml(fitText(`${p.n}. ${p.title}`, 14, textW - 22))}</text>
+${statusMark(W - PAD - 6, PAD + 10, 'planned', color)}
+<text class="m" x="${TEXT_X}" y="${PAD + 38}" font-family="${FONT}" font-size="11">${xml(fitText(meta, 11, textW))}</text>`,
   )
 }
 
@@ -648,14 +673,14 @@ const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: Totals):
 
 // Section heads on the desktop: a colored bar per section.
 const SECTION_COLOR = { running: '#1F9D55', finished: '#E0A419', planned: '#9A9A96' }
-const SECTION_H = 36
+const SECTION_H = 48
 
 const sectionSvg = (W: number, color: string, label: string): string =>
   svg(
     W,
     SECTION_H,
-    `<rect width="${W}" height="28" rx="6" fill="${color}"/>
-<text x="12" y="19" fill="#ffffff" font-family="${FONT}" font-size="13" font-weight="600">${xml(fitText(label, 13, W - 24))}</text>`,
+    `<rect y="10" width="${W}" height="28" rx="8" fill="${color}"/>
+<text x="12" y="29" fill="#ffffff" font-family="${FONT}" font-size="13" font-weight="600">${xml(fitText(label, 13, W - 24))}</text>`,
     false,
   )
 
@@ -775,11 +800,16 @@ async function autoOpen($: EngineInterface, key: string): Promise<void> {
   void $.ui.open({ id: PANE, title: tr().pane })
 }
 
+// A setting's positive number; an empty field, 0 or junk reads as unset.
+const positive = (raw: unknown): number | undefined => {
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() ? Number(raw) : NaN
+  return Number.isFinite(n) && n > 0 ? n : undefined
+}
+
 export const register: Register = (on, options) => {
   // An empty field reads as unset, not as 0%: the default stands.
-  const warnRaw = options.contextWarnPercent
-  const warnValue = typeof warnRaw === 'number' ? warnRaw : typeof warnRaw === 'string' && warnRaw.trim() ? Number(warnRaw) : NaN
-  const warnPercent = Number.isFinite(warnValue) && warnValue > 0 ? warnValue : 80
+  const warnPercent = positive(options.contextWarnPercent) ?? 80
+  const tokenBudget = positive(options.tokenBudget) ?? 0
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     lang = await detectLang($, options.language)
@@ -1055,7 +1085,7 @@ export const register: Register = (on, options) => {
     const toggleDone = (
       <Button
         key="done"
-        label={`${p.isDoneCollapsed ? '▸' : '▾'} ${s.finished} · ${finished.length}`}
+        label={`${p.isDoneCollapsed ? '▸' : '▾'} ${s.finished} ${finished.length}`}
         plain
         onPress={() => update($, panel, prev => ({ ...prev, isDoneCollapsed: !prev.isDoneCollapsed }))}
       />
@@ -1071,30 +1101,35 @@ export const register: Register = (on, options) => {
       const section = (key: string, color: string, label: string) => (
         <Svg key={key} source={sectionSvg(W, color, label)} alt={label} width={W} height={SECTION_H} />
       )
-      // The pane's own controls: compact view, and folding the finished runs away.
-      const controls = (
-        <Box flexDirection="row" gap={2}>
-          {toggleCompact}
-          {finished.length > 0 && !p.isCompact && toggleDone}
+      // The title with the compact toggle on its right.
+      const titleRow = (
+        <Box flexDirection="row" alignItems="center">
+          <Svg source={titleSvg(W - TITLE_BUTTON_W, title)} alt={title} width={W - TITLE_BUTTON_W} height={TITLE_H} />
+          <Button
+            key="compact"
+            label={p.isCompact ? s.expand : s.collapse}
+            variant="secondary"
+            onPress={() => update($, panel, prev => ({ ...prev, isCompact: !prev.isCompact }))}
+          />
         </Box>
       )
 
       if (p.isCompact) {
         return (
           <Box flexDirection="column" gap={1} alignItems="center">
+            {titleRow}
             <Svg source={compactSvg(W, list, planned, t)} alt={`${list.length} ${s.agentsCount}, ${summary}`} width={W} height={32} />
-            {controls}
           </Box>
         )
       }
-      const shownDone = p.isDoneCollapsed ? [] : finished
       const sections = [running.length, finished.length, planned.length].filter(n => n > 0).length
+      const limits: Limits = { warnPercent, tokenBudget, maxTokens: Math.max(0, ...list.map(a => a.tokens)) }
       const gridH =
-        HEADER_H +
-        LINE_H +
+        TITLE_H +
+        TILES_H +
         (isEmpty ? LINE_H : 0) +
         sections * SECTION_H +
-        [...running, ...shownDone].reduce((h, a) => h + cardHeight(W, a, at) + CARD_GAP, 0) +
+        [...running, ...finished].reduce((h, a) => h + cardHeight(a) + CARD_GAP, 0) +
         planned.length * (PLANNED_H + CARD_GAP)
       return (
         <Box flexDirection="column" alignItems="center">
@@ -1104,24 +1139,24 @@ export const register: Register = (on, options) => {
             <Svg key={`grid-${i}`} source={gridSvg(W, tileH)} alt="dotted grid" width={W} height={tileH} />
           ))}
           <Box flexDirection="column" position="absolute" top={0} left={0} right={0} alignItems="center">
-            <Svg source={headerSvg(W, title, t)} alt={`${title}: ${summary}`} width={W} height={HEADER_H} />
-            {controls}
+            {titleRow}
+            <Svg source={tilesSvg(W, t)} alt={summary} width={W} height={TILES_H} />
             {isEmpty && <Text dimColor>{s.empty}</Text>}
-            {running.length > 0 && section('h-run', SECTION_COLOR.running, `▾ ${s.running} · ${running.length}`)}
+            {running.length > 0 && section('h-run', SECTION_COLOR.running, `${s.running} ${running.length}`)}
             {running.map(a => (
-              <Svg key={a.id} source={agentSvg(W, a, at)} alt={runAlt(a, s.isRunning)} width={W} height={cardHeight(W, a, at) + CARD_GAP} />
+              <Svg key={a.id} source={agentSvg(W, a, at, limits)} alt={runAlt(a, s.isRunning)} width={W} height={cardHeight(a) + CARD_GAP} />
             ))}
-            {finished.length > 0 && section('h-done', SECTION_COLOR.finished, `${p.isDoneCollapsed ? '▸' : '▾'} ${s.finished} · ${finished.length}`)}
-            {shownDone.map(a => (
+            {finished.length > 0 && section('h-done', SECTION_COLOR.finished, `${s.finished} ${finished.length}`)}
+            {finished.map(a => (
               <Svg
                 key={a.id}
-                source={agentSvg(W, a, at)}
+                source={agentSvg(W, a, at, limits)}
                 alt={runAlt(a, a.status === 'failed' ? s.isFailed : s.isFinished)}
                 width={W}
-                height={cardHeight(W, a, at) + CARD_GAP}
+                height={cardHeight(a) + CARD_GAP}
               />
             ))}
-            {planned.length > 0 && section('h-plan', SECTION_COLOR.planned, `${s.planned} · ${planned.length}`)}
+            {planned.length > 0 && section('h-plan', SECTION_COLOR.planned, `${s.planned} ${planned.length}`)}
             {planned.map(pl => (
               <Svg key={`plan-${pl.n}`} source={plannedSvg(W, pl)} alt={`${pl.n}. ${pl.title}: ${s.isPlanned}`} width={W} height={PLANNED_H + CARD_GAP} />
             ))}
@@ -1133,9 +1168,12 @@ export const register: Register = (on, options) => {
     // Terminal: the same content in text rows.
     const cols = Math.max(24, e.props.bodyColumns || 40)
     const barW = Math.max(6, Math.min(20, cols - 34))
+    const meterW = Math.max(4, Math.min(10, Math.floor((cols - 30) / 2)))
+    const limits: Limits = { warnPercent, tokenBudget, maxTokens: Math.max(0, ...list.map(a => a.tokens)) }
+    const TERM_LEVEL = { ok: undefined, caution: 'yellow', over: 'red' } as const
     const row = (a: AgentRun) => {
       const color = colorOf(a.type)
-      const ctx = ctxOf(a)
+      const m = metersOf(a, limits)
       const progress = progressOf(a)
       const steps = stepLines(a)
       return (
@@ -1155,12 +1193,26 @@ export const register: Register = (on, options) => {
           </Text>
           <Text wrap="truncate-end">
             {'  '}
-            {progress === null ? <Text dimColor>{ctxBar(ctx.percent, barW)}</Text> : <Text color={color}>{ctxBar(progress * 100, barW)}</Text>}
+            <Text dimColor>{s.ctx} </Text>
+            <Text color={TERM_LEVEL[m.ctx.level]} dimColor={m.ctx.level === 'ok'}>
+              {ctxBar(Math.min(100, m.ctx.ratio * 100), meterW)}
+            </Text>
             <Text dimColor>
               {' '}
-              {fmtCtx(a)} · {fmtTokens(a.tokens)} {s.tokensWord} · {fmtTime(elapsed(a, at))}
+              {m.ctx.value}  {s.tokensWord}{' '}
+            </Text>
+            <Text color={TERM_LEVEL[m.tokens.level] ?? color}>{ctxBar(Math.min(100, m.tokens.ratio * 100), meterW)}</Text>
+            <Text dimColor>
+              {' '}
+              {m.tokens.value} · {fmtTime(elapsed(a, at))}
             </Text>
           </Text>
+          {progress !== null && (
+            <Text color={color} wrap="truncate-end">
+              {'  '}
+              {ctxBar(progress * 100, barW)}
+            </Text>
+          )}
           {steps && (
             <Text color={STEP_COLOR[a.status]} wrap="truncate-end">
               {'  '}
@@ -1206,7 +1258,7 @@ export const register: Register = (on, options) => {
             {isEmpty && <Text dimColor>{s.empty}</Text>}
             {running.length > 0 && (
               <Text dimColor>
-                {s.running} · {running.length}
+                {s.running} {running.length}
               </Text>
             )}
             {running.map(row)}
@@ -1214,7 +1266,7 @@ export const register: Register = (on, options) => {
             {!p.isDoneCollapsed && finished.map(row)}
             {planned.length > 0 && (
               <Text dimColor>
-                {s.planned} · {planned.length}
+                {s.planned} {planned.length}
               </Text>
             )}
             {planned.map(pl => (

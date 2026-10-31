@@ -54,7 +54,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: PLUGIN, surface, component: 'Pane', requestId: 'crew-agents', props: pane })
     // The section head is a Text on the terminal and an Svg bar (named by its alt) on the desktop.
     const heads = [...(await ui.findAll({ type: 'Text' })).map(el => String(el.text)), ...(await ui.findAll({ type: 'Svg' })).map(el => String(el.props.alt))]
-    expect(heads.some(h => /Planned · 200/.test(h))).toBe(true)
+    expect(heads.some(h => /Planned 200/.test(h))).toBe(true)
     const drawn = (await ui.findAll({ type: 'Svg' })).map(el => String(el.props.source)).join('')
     expect(drawn).not.toContain('native code')
     expect(drawn).not.toContain('[object')
