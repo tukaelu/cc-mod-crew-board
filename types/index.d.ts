@@ -46,6 +46,20 @@ export type AgentRun = {
   stepNotes?: string[]
 }
 
+/** The main session's loop, kept for its own card. */
+export type MainAgent = {
+  /** A model turn of the main loop is running. */
+  isTurn: boolean
+  turnStartedAt: number
+  /** Foreground Agent calls of the main loop still waiting for their subagent. */
+  agentCalls: number
+  /** Permission prompts and questions put to the person that are up, any loop's. */
+  asks: number
+  model: string
+  contextTokens: number
+  steps: number
+}
+
 export type Panel = {
   isCompact: boolean
   isDoneCollapsed: boolean
@@ -70,6 +84,7 @@ declare module 'claude-code' {
     'crew-board': {
       flow: Flow | null
       agents: AgentRun[]
+      main: MainAgent
       panel: Panel
       now: number
     }

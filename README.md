@@ -3,14 +3,16 @@
 A Claude Code mod that shows the plan and the subagents working on it: a progress band above the prompt and a crew panel beside the chat.
 
 - **Band**: the plan's title, a progress bar (done tasks, with launched tasks as a faint layer and a tick per planned task), the phase and count, the percentage and a mendako mascot. The crew-size button opens the panel; ✕ hides the band.
-- **Crew Board panel** (`/crew` toggles it, `/crew open` only opens it): the chat's total cost, then running, finished and planned subagents as cards: the current step and the notes before it, model, context fill, tokens and elapsed time. Effort shows as the height of the seaweed beside the mendako.
+- **Crew Board panel** (`/crew` toggles it, `/crew open` only opens it): the chat's total cost, the main session's card (a mendako in a captain's cap, with its context fill), then running, finished and planned subagents as cards: the current step and the notes before it, model, context fill, tokens and elapsed time. Effort shows as the height of the seaweed beside the mendako.
+
+The main session's card says whose move it is: **working** (●) while its turn runs; **waiting for its crew** (…) while it waits on an Agent call, or between turns while a subagent still runs (the desktop app launches every subagent in the background); **your turn** (▶) when nothing runs, and whenever a permission prompt or a question (`AskUserQuestion`, `ExitPlanMode`) is up, a subagent's prompt included.
 
 ## Tools it adds
 
 - `mcp__crew-board__progress`: the main session reports the plan (title, tasks with `subagent_type` and `after`, a free-text phase, done count, `finished`). A call from a subagent is ignored.
 - `mcp__crew-board__step`: a subagent reports its own steps (`done`, `total`, `note`). A run that does not report shows no step lines or progress bar; its context and token meters are there either way.
 
-The cost in the panel's header is the whole chat's, as Claude Code's own ledger counts it (the `/cost` total, main session included); `—` where the host keeps none. Rows carry no cost: the engine does not report one per subagent.
+The cost in the panel's header is the whole chat's, as Claude Code's own ledger counts it (the `/cost` total, main session included); `—` where the host keeps none. Rows carry no cost: the engine does not report one per subagent. The header's tokens and time are the subagents' alone: their tokens summed, and the span from the first one's start to the last one's end.
 
 ## Install
 
