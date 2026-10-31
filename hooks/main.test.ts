@@ -126,6 +126,24 @@ test('main: a subagent’s permission prompt is the person’s turn too', async 
   expect(await mainRow($)).toMatch(/Main\n●/)
 })
 
+test('main: the compact panel puts the main session first', async ($, on) => {
+  engine($, on)
+  await $.agent.spawn({ tool_use_id: 't1', prompt: 'p', description: 'x', subagentType: 'general-purpose', provider: 'engine', parentModel: 'claude-opus-5-5', background: true, fork: false } as never)
+  const desk = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'Pane', requestId: 'crew-agents', props: pane })
+  await desk.press({ key: 'compact' })
+  const row = (await desk.findAll({ type: 'Svg' })).map(el => ({ alt: String(el.props.alt), source: String(el.props.source) })).find(s => s.alt.startsWith('Main:'))
+  await desk.unmount()
+  expect(row?.alt).toMatch(/^Main: waiting for the crew, ctx —; 1 agents/)
+  // The captain's cap is drawn before the subagent's carpenter helmet.
+  expect(row?.source.indexOf('#2B3A67')).toBeGreaterThan(-1)
+  expect(row?.source.indexOf('#2B3A67')).toBeLessThan(row?.source.indexOf('#FBE08A') ?? 0)
+  const term = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'Pane', requestId: 'crew-agents', props: pane })
+  // The compact switch is the panel's, already on from the desktop's press.
+  const shown = (await term.findAll({ type: 'Text' })).map(el => String(el.text ?? '')).join('\n')
+  await term.unmount()
+  expect(shown).toMatch(/… ● /)
+})
+
 test('main: the captain wears a cap and no prop', () => {
   const cap = mendako('captain', 'run', '#8f8cf4')
   expect(cap).toContain('fill="#2B3A67"')

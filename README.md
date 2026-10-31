@@ -28,7 +28,7 @@ Each subagent's brief gets one request at its end to report steps with `mcp__cre
 
 Set in `/config` (in a terminal) or in `~/.claude/settings.json` under `pluginConfigs`, for example `"pluginConfigs": { "crew-board": { "options": { "showMascot": false } } }`. The fields: `showMascot` (default on; off, the band and the cards drop the mendako and give its room to the text), `language` (`auto`, `en`, `ja`), `autoOpen` (`plan`, `any`), `contextWarnPercent` (default 80), `tokenBudget` (tokens per subagent; 0, the default, turns token warnings off), `stepInclude` and `stepExclude` (comma-separated agent types).
 
-Each card has a context meter and a token meter. A meter turns yellow past three quarters of its limit and red past it: the context's limit is `contextWarnPercent`, the tokens' is `tokenBudget`. With no budget the token meter compares each run with the one that used the most and never warns.
+Each subagent card has a context meter and a token meter; the main session's card has the context meter alone. A meter turns yellow past three quarters of its limit and red past it: the context's limit is `contextWarnPercent`, the tokens' is `tokenBudget`. With no budget the token meter compares each run with the one that used the most and never warns.
 
 ## License
 

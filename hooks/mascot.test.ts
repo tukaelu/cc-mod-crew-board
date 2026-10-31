@@ -131,7 +131,8 @@ for (const isShown of [true, false]) {
     await ui.unmount()
     const card = svgs.find(s => s.alt.startsWith('Tester'))?.source ?? ''
     const planned = svgs.find(s => s.alt.startsWith('1. Later'))?.source ?? ''
-    for (const s of [card, planned]) {
+    const main = svgs.find(s => s.alt.startsWith('Main:'))?.source ?? ''
+    for (const s of [card, planned, main]) {
       expect(s.includes('shape-rendering="crispEdges"')).toBe(isShown)
       expect(/<text class="[ts]" x="(\d+)"/.exec(s)?.[1]).toBe(isShown ? '96' : '18')
     }
