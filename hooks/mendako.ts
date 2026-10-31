@@ -7,7 +7,7 @@ type Point = [x: number, y: number]
 type Anim = { cls: string; delay: number; px: Rect[] }
 type Costume = { hat: Rect[]; prop: { still: Rect[]; anim: Anim[] } }
 
-export type CostumeKey = 'explorer' | 'planner' | 'carpenter' | 'detective' | 'wizard' | 'mail' | 'none'
+export type CostumeKey = 'explorer' | 'planner' | 'carpenter' | 'detective' | 'wizard' | 'mail' | 'captain' | 'none'
 export type MascotState = 'run' | 'done' | 'fail' | 'wait'
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
@@ -90,6 +90,11 @@ export const MENDAKO = {
       hat: [[5, 3, 6, 1, '#3A6EA5'], [5, 4, 6, 1, '#3A6EA5'], [11, 4, 1, 1, '#2A5080'], [7, 3, 1, 1, C.gold]],
       prop: { still: [], anim: [{ cls: 'p-bob', delay: 0, px: [
         [15, 9, 3, 2, '#F4F3EE'], [15, 9, 1, 1, '#D8D7D2'], [16, 10, 1, 1, '#D8D7D2'], [17, 9, 1, 1, '#D0453F']] }] },
+    },
+    // The main session's: a captain's cap, no prop.
+    captain: {
+      hat: [[5, 2, 6, 1, '#DCDAD3'], [5, 3, 6, 1, '#2B3A67'], [7, 3, 2, 1, C.gold], [4, 4, 8, 1, '#41528A']],
+      prop: { still: [], anim: [] },
     },
     none: { hat: [], prop: { still: [], anim: [] } },
   } as Record<CostumeKey, Costume>,

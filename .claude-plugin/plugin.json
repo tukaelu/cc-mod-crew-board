@@ -1,7 +1,7 @@
 {
   "name": "crew-board",
-  "version": "0.1.0",
-  "description": "Plan and subagent progress above the prompt, plus a crew panel (/crew): running, finished and planned subagents with model, steps, context, tokens and time.",
+  "version": "0.2.0",
+  "description": "Plan and subagent progress above the prompt, plus a crew panel (/crew): whose move it is and the main context fill, then running, finished and planned subagents with model, steps, context, tokens and time.",
   "author": {
     "name": "Tsukasa Nishiyama"
   },

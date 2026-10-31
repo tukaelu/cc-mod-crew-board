@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRun, Flow, Panel, PlannedTask } from '../types'
+import type { AgentRun, Flow, MainAgent, Panel, PlannedTask } from '../types'
 import { MASCOT_CSS, costumeOf, mendako } from './mendako'
 import type { MascotState } from './mendako'
 
@@ -13,6 +13,15 @@ const panel = atom({ plugin: 'crew-board', key: 'panel' } as const, {
   autoOpenedFor: '',
 })
 const now = atom({ plugin: 'crew-board', key: 'now' } as const, 0)
+const main = atom({ plugin: 'crew-board', key: 'main' } as const, {
+  isTurn: false,
+  turnStartedAt: 0,
+  agentCalls: 0,
+  asks: 0,
+  model: '',
+  contextTokens: 0,
+  steps: 0,
+} as MainAgent)
 
 const TOOL = 'mcp__crew-board__progress'
 const STEP_TOOL = 'mcp__crew-board__step'
@@ -27,6 +36,11 @@ const STEP_BRIEF = `
 [A note from crew-board, the panel that shows your progress. It is not part of the task above: do not include it in your answer.]
 Before any other work, call \`${STEP_TOOL}\` with \`total\` (your plan in 3-8 steps) and \`done: 0\`; call it again with \`done\` and a few-word \`note\` as each step finishes. It only draws a progress bar. If you cannot find this tool, skip this silently.`
 const PANE = 'crew-agents'
+// Tools that wait on the person by their nature: the main card shows "your turn" while one runs.
+const PERSON_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode'])
+// The permission prompts up, as `<agentId>:<tool>`; the call's end takes its entry off.
+// ponytail: matched by loop and tool name, not by call; two prompts for one tool in one loop may swap.
+const asked: string[] = []
 // The tools' schemas are advice to the model, not a check: what a call may ask
 // the band and the panel to draw is bounded here.
 const MAX_TASKS = 200
@@ -60,7 +74,7 @@ const STRINGS = {
     pane: 'Crew Board',
     cost: 'Total chat cost',
     tokens: 'Subagent tokens',
-    time: 'Time',
+    time: 'Subagent time',
     collapse: 'Collapse',
     expand: 'Expand',
     running: 'Running',
@@ -93,12 +107,16 @@ const STRINGS = {
     failedToast: (d: string) => `Subagent failed: ${d}`,
     ctxToast: (d: string, ctx: string) => `${d}: ${ctx}`,
     doneToast: (t: string) => `Plan complete: ${t}`,
+    main: 'Main',
+    mainWorking: 'working',
+    mainCrew: 'waiting for the crew',
+    mainYours: 'your turn',
   },
   ja: {
     pane: 'Crew Board',
     cost: 'コスト（全体）',
     tokens: 'トークン（サブ）',
-    time: '時間',
+    time: '時間（サブ）',
     collapse: '縮小',
     expand: '展開',
     running: '実行中',
@@ -131,6 +149,10 @@ const STRINGS = {
     failedToast: (d: string) => `サブエージェントが失敗しました: ${d}`,
     ctxToast: (d: string, ctx: string) => `${d}: ${ctx}`,
     doneToast: (t: string) => `計画が完了しました: ${t}`,
+    main: 'メイン',
+    mainWorking: '作業中',
+    mainCrew: 'クルー待ち',
+    mainYours: 'あなたの番',
   },
 } as const
 
@@ -501,15 +523,21 @@ const progressOf = (a: AgentRun): number | null => {
   return null
 }
 
+type Usage = { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }
+
+// What one model request held: its prompt, cached or not, and its answer.
+const contextOf = (u: Usage): number =>
+  (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.output_tokens || 0)
+
 // Context fill against the model's window; `isGuessed` when the window table lacks the
 // model. null until a request's usage was seen: a turn's sum is not a context size.
-const ctxOf = (a: AgentRun): { percent: number | null; isGuessed: boolean } => {
+const ctxOf = (a: Pick<AgentRun, 'model' | 'steps' | 'contextTokens'>): { percent: number | null; isGuessed: boolean } => {
   const w = windowOf(a.model)
   if (a.steps === 0) return { percent: null, isGuessed: w.isGuessed }
   return { percent: Math.min(100, Math.round((a.contextTokens / w.max) * 100)), isGuessed: w.isGuessed }
 }
 
-const fmtCtx = (a: AgentRun): string => {
+const fmtCtx = (a: Pick<AgentRun, 'model' | 'steps' | 'contextTokens'>): string => {
   const c = ctxOf(a)
   return c.percent === null ? `${tr().ctx} —` : `${tr().ctx} ${c.percent}%${c.isGuessed ? '?' : ''}`
 }
@@ -566,14 +594,17 @@ const LEVEL_COLOR = { caution: '#E0A419', over: '#D0453F' }
 // against the run that used the most, and then never colored as a warning.
 type Limits = { warnPercent: number; tokenBudget: number; maxTokens: number }
 
-const metersOf = (a: AgentRun, l: Limits) => {
+const ctxMeter = (a: Pick<AgentRun, 'model' | 'steps' | 'contextTokens'>, warnPercent: number) => {
   const ctx = ctxOf(a)
+  return ctx.percent === null
+    ? { ratio: 0, value: '—', level: 'ok' as Level }
+    : { ratio: ctx.percent / 100, value: `${ctx.percent}%${ctx.isGuessed ? '?' : ''}`, level: levelOf(ctx.percent / warnPercent) }
+}
+
+const metersOf = (a: AgentRun, l: Limits) => {
   const hasBudget = l.tokenBudget > 0
   return {
-    ctx:
-      ctx.percent === null
-        ? { ratio: 0, value: '—', level: 'ok' as Level }
-        : { ratio: ctx.percent / 100, value: `${ctx.percent}%${ctx.isGuessed ? '?' : ''}`, level: levelOf(ctx.percent / l.warnPercent) },
+    ctx: ctxMeter(a, l.warnPercent),
     tokens: {
       ratio: hasBudget ? a.tokens / l.tokenBudget : l.maxTokens ? a.tokens / l.maxTokens : 0,
       value: hasBudget ? `${fmtTokens(a.tokens)} / ${fmtTokens(l.tokenBudget)}` : fmtTokens(a.tokens),
@@ -623,6 +654,58 @@ ${progress === null ? '' : `<rect class="k" x="${tx}" y="${barY}" width="${textW
   )
 }
 
+// The main session's card: working, waiting on its subagents, or waiting on the person.
+type MainState = 'working' | 'crew' | 'yours'
+
+// The desktop launches every Agent call in the background and the turn ends, so
+// running subagents mean waiting on the crew outside a turn too.
+const mainStateOf = (m: MainAgent, hasRunning: boolean): MainState => {
+  if (m.asks > 0) return 'yours'
+  if (m.isTurn) return m.agentCalls > 0 ? 'crew' : 'working'
+  return hasRunning ? 'crew' : 'yours'
+}
+
+const mainLabel = (st: MainState): string => ({ working: tr().mainWorking, crew: tr().mainCrew, yours: tr().mainYours })[st]
+
+const MAIN_GLYPH: Record<MainState, string> = { working: '●', crew: '…', yours: '▶' }
+const YOURS = '#D97757'
+
+const mainMark = (x: number, y: number, st: MainState): string => {
+  if (st === 'working') return `<circle class="live" cx="${x}" cy="${y}" r="3.5" fill="${ACCENT}"/>`
+  if (st === 'crew') return [-5, 0, 5].map(dx => `<circle cx="${x + dx}" cy="${y}" r="1.5" fill="#9a9a96"/>`).join('')
+  return `<path class="live" d="M${x - 3} ${y - 4.5}L${x + 4.5} ${y}L${x - 3} ${y + 4.5}z" fill="${YOURS}"/>`
+}
+
+// The captain holds still, eyes open, unless the main loop is working.
+const mainMascot = (x: number, y: number, scale: number, st: MainState): string =>
+  !showMascot ? '' : `<g transform="translate(${x},${y}) scale(${scale})" shape-rendering="crispEdges">${mendako('captain', 'run', ACCENT, undefined, st === 'working')}</g>`
+
+// The plan's phase, while a plan runs.
+const phaseOf = (f: Flow | null): string => (f && !f.isFinished ? f.phase : '')
+
+const mainAlt = (m: MainAgent, st: MainState, phase: string): string => [`${tr().main}: ${mainLabel(st)}`, fmtCtx(m), ...(phase ? [phase] : [])].join(', ')
+
+// Title 30, phase 50, the context meter to 84.
+const MAIN_H = 84 + PAD
+
+const mainSvg = (W: number, m: MainAgent, st: MainState, phase: string, at: number, warnPercent: number): string => {
+  const tx = textX()
+  const textW = W - tx - PAD
+  const c = ctxMeter(m, warnPercent)
+  const time = m.isTurn ? fmtTime(at - m.turnStartedAt) : ''
+  return svg(
+    W,
+    MAIN_H + CARD_GAP,
+    `<rect class="card${st === 'working' ? '' : ' ln'}" x="0.75" y="0.75" width="${W - 1.5}" height="${MAIN_H - 1.5}" rx="12"${st === 'working' ? ` stroke="${ACCENT}" stroke-width="1.5"` : ''}/>
+${mainMascot(15, (MAIN_H - 48) / 2, 3, st)}
+<text class="t" x="${tx}" y="${PAD + 16}" font-family="${FONT}" font-size="14" font-weight="600">${xml(tr().main)}</text>
+${mainMark(W - PAD - 6, PAD + 10, st)}
+<text class="s" x="${tx}" y="${PAD + 36}" font-family="${FONT}" font-size="11">${xml(fitText(phase, 11, textW - textWidth(time, 11) - 12))}</text>
+<text class="s" x="${W - PAD}" y="${PAD + 36}" text-anchor="end" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${time}</text>
+${meter(tx, 70, textW, tr().ctx, c.value, c.ratio, c.level === 'ok' ? '#8A8A86' : LEVEL_COLOR[c.level])}`,
+  )
+}
+
 const PLANNED_H = 76
 
 const plannedSvg = (W: number, p: Planned): string => {
@@ -641,7 +724,7 @@ ${statusMark(W - PAD - 6, PAD + 10, 'planned', color)}
   )
 }
 
-const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: Totals): string => {
+const compactSvg = (W: number, st: MainState, list: AgentRun[], planned: Planned[], t: Totals): string => {
   const icons = [
     ...list.filter(a => a.status === 'running').map(a => ({ type: a.type, status: a.status as string, state: stateOf(a.status), isMoving: true })),
     ...list.filter(a => a.status !== 'running').map(a => ({ type: a.type, status: a.status as string, state: stateOf(a.status), isMoving: false })),
@@ -649,22 +732,25 @@ const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: Totals):
   ]
   // With no mendako each run is its status mark alone, so more of them fit.
   const step = showMascot ? 36 : 20
-  const fit = Math.max(1, Math.floor((W - 150) / step))
+  // The main session comes first, then the subagents.
+  const head = showMascot ? mainMascot(0, 4, 1.5, st) + mainMark(32, 4, st) : mainMark(8, 16, st)
+  const fit = Math.max(0, Math.floor((W - 150) / step) - 1)
   const shown = icons.slice(0, fit)
   const more = icons.length - shown.length
   const body = shown
-    .map((ic, i) =>
-      showMascot
+    .map((ic, j) => {
+      const i = j + 1
+      return showMascot
         ? mascot(i * step, 4, 1.5, ic.type, ic.state, ic.isMoving) +
-          (ic.isMoving ? `<circle class="live" cx="${i * step + 32}" cy="4" r="3" fill="${colorOf(ic.type)}"/>` : '')
-        : statusMark(i * step + 8, 16, ic.status, colorOf(ic.type)),
-    )
+            (ic.isMoving ? `<circle class="live" cx="${i * step + 32}" cy="4" r="3" fill="${colorOf(ic.type)}"/>` : '')
+        : statusMark(i * step + 8, 16, ic.status, colorOf(ic.type))
+    })
     .join('')
-  const x = shown.length * step + (more ? 4 : 0)
+  const x = (shown.length + 1) * step + (more ? 4 : 0)
   return svg(
     W,
     32,
-    `${body}${more ? `<text class="s" x="${x}" y="21" font-family="${FONT}" font-size="12">+${more}</text>` : ''}
+    `${head}${body}${more ? `<text class="s" x="${x}" y="21" font-family="${FONT}" font-size="12">+${more}</text>` : ''}
 <text class="s" x="${W}" y="21" text-anchor="end" font-family="${FONT}" font-size="12" font-variant-numeric="tabular-nums">${fmtChat(t.chatUsd)} · ${fmtTokens(t.tokens)} · ${fmtTime(t.time)}</text>`,
   )
 }
@@ -821,6 +907,8 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     lang = await detectLang($, options.language)
+    // What was in flight before a reload is not heard ending: start the counts over.
+    await update($, main, m => ({ ...m, agentCalls: 0, asks: 0 }))
     await $.tool.register({
       name: 'progress',
       description:
@@ -877,11 +965,11 @@ export const register: Register = (on, options) => {
       description: 'Show or hide the crew panel: running, finished and planned subagents with model, context, cost and time',
     })
 
-    // Ticks the running agents' clocks; quiet when nothing runs.
+    // Ticks the running agents' and the main turn's clocks; quiet when nothing runs.
     $.clock.every(1000, () => {
       void (async () => {
         const list = await read($, agents)
-        if (!list.some(a => a.status === 'running')) return
+        if (!list.some(a => a.status === 'running') && !(await read($, main)).isTurn) return
         const at = await $.clock.now()
         await update($, now, () => at)
       })()
@@ -942,6 +1030,38 @@ export const register: Register = (on, options) => {
       }),
     )
     return { result: matched ? 'ok' : `ignored: no panel row for agent ${agentId}` }
+  })
+
+  // The main card's state: a question put to the person, and the subagents the main
+  // loop waits on. A permission prompt raised in the call counts until the call ends.
+  on('tool.call', async ($, e, next) => {
+    const isQuestion = !e.agentId && PERSON_TOOLS.has(e.tool)
+    const isAgent = !e.agentId && e.tool === 'Agent'
+    if (isQuestion || isAgent) await update($, main, m => ({ ...m, asks: m.asks + (isQuestion ? 1 : 0), agentCalls: m.agentCalls + (isAgent ? 1 : 0) }))
+    try {
+      return await next(e)
+    } finally {
+      const key = `${e.agentId ?? ''}:${e.tool}`
+      const i = asked.indexOf(key)
+      if (i >= 0) asked.splice(i, 1)
+      const asks = (isQuestion ? 1 : 0) + (i >= 0 ? 1 : 0)
+      if (asks || isAgent) await update($, main, m => ({ ...m, asks: Math.max(0, m.asks - asks), agentCalls: Math.max(0, m.agentCalls - (isAgent ? 1 : 0)) }))
+    }
+  })
+
+  on('classic.PermissionRequest', async ($, e, next) => {
+    asked.push(`${e.agent_id ?? ''}:${e.tool_name}`)
+    await update($, main, m => ({ ...m, asks: m.asks + 1 }))
+    return next(e)
+  })
+
+  on('turn.start', async ($, e, next) => {
+    if (!e.agentId) {
+      const at = await $.clock.now()
+      await update($, main, m => ({ ...m, isTurn: true, turnStartedAt: at }))
+      await update($, now, () => at)
+    }
+    return next(e)
   })
 
   // Safety net: every Agent launch moves the faint layer even if the orchestrator forgets to report.
@@ -1010,7 +1130,11 @@ export const register: Register = (on, options) => {
     const result = yield* next(e)
     const agentId = e.agentId
     const usage = result.usage
-    if (!agentId || !usage) return result
+    if (!usage) return result
+    if (!agentId) {
+      await update($, main, m => ({ ...m, model: usage.model || e.model, contextTokens: contextOf(usage), steps: m.steps + 1 }))
+      return result
+    }
 
     const model = usage.model || e.model
     await update($, agents, list =>
@@ -1023,17 +1147,8 @@ export const register: Register = (on, options) => {
               effort: typeof e.effort === 'string' ? e.effort : a.effort,
               status: 'running',
               endedAt: undefined,
-              contextTokens:
-                (usage.input_tokens || 0) +
-                (usage.cache_read_input_tokens || 0) +
-                (usage.cache_creation_input_tokens || 0) +
-                (usage.output_tokens || 0),
-              tokens:
-                a.tokens +
-                (usage.input_tokens || 0) +
-                (usage.output_tokens || 0) +
-                (usage.cache_read_input_tokens || 0) +
-                (usage.cache_creation_input_tokens || 0),
+              contextTokens: contextOf(usage),
+              tokens: a.tokens + contextOf(usage),
               steps: a.steps + 1,
             },
       ),
@@ -1076,6 +1191,8 @@ export const register: Register = (on, options) => {
         }),
       )
       await settleAdHoc($)
+    } else {
+      await update($, main, m => ({ ...m, isTurn: false }))
     }
     // Every turn redraws the panel, the main session's too: the chat's cost moved.
     const at = await $.clock.now()
@@ -1090,7 +1207,10 @@ export const register: Register = (on, options) => {
     const list = await read($, agents)
     const f = await read($, flow)
     const p: Panel = await read($, panel)
-    const at = Math.max(await read($, now), ...list.map(a => a.startedAt), 0)
+    const m: MainAgent = await read($, main)
+    const at = Math.max(await read($, now), ...list.map(a => a.startedAt), m.turnStartedAt, 0)
+    const phase = phaseOf(f)
+    const mainSt = mainStateOf(m, list.some(a => a.status === 'running'))
 
     const running = list.filter(a => a.status === 'running').reverse()
     const finished = list.filter(a => a.status !== 'running').reverse()
@@ -1145,7 +1265,7 @@ export const register: Register = (on, options) => {
         return (
           <Box flexDirection="column" gap={1} alignItems="center">
             {titleRow}
-            <Svg source={compactSvg(W, list, planned, t)} alt={`${list.length} ${s.agentsCount}, ${summary}`} width={W} height={32} />
+            <Svg source={compactSvg(W, mainSt, list, planned, t)} alt={`${mainAlt(m, mainSt, phase)}; ${list.length} ${s.agentsCount}, ${summary}`} width={W} height={32} />
           </Box>
         )
       }
@@ -1155,6 +1275,8 @@ export const register: Register = (on, options) => {
       const gridH =
         TITLE_H +
         TILES_H +
+        MAIN_H +
+        CARD_GAP +
         (isEmpty ? LINE_H : 0) +
         sections * SECTION_H +
         [...running, ...shownDone].reduce((h, a) => h + cardHeight(a) + CARD_GAP, 0) +
@@ -1169,6 +1291,7 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column" position="absolute" top={0} left={0} right={0} alignItems="center">
             {titleRow}
             <Svg source={tilesSvg(W, t)} alt={summary} width={W} height={TILES_H} />
+            <Svg source={mainSvg(W, m, mainSt, phase, at, warnPercent)} alt={mainAlt(m, mainSt, phase)} width={W} height={MAIN_H + CARD_GAP} />
             {isEmpty && <Text dimColor>{s.empty}</Text>}
             {running.length > 0 && section('h-run', SECTION_COLOR.running, `${s.running} ${running.length}`)}
             {running.map(a => (
@@ -1214,6 +1337,8 @@ export const register: Register = (on, options) => {
     const meterW = Math.max(4, Math.min(10, Math.floor((cols - 30) / 2)))
     const limits: Limits = { warnPercent, tokenBudget, maxTokens: Math.max(0, ...list.map(a => a.tokens)) }
     const TERM_LEVEL = { ok: undefined, caution: 'yellow', over: 'red' } as const
+    const mainColor = mainSt === 'working' ? ACCENT : mainSt === 'yours' ? YOURS : 'gray'
+    const mainCtx = ctxMeter(m, warnPercent)
     const row = (a: AgentRun) => {
       const color = colorOf(a.type)
       const m = metersOf(a, limits)
@@ -1285,6 +1410,7 @@ export const register: Register = (on, options) => {
         </Text>
         {p.isCompact ? (
           <Text wrap="truncate-end">
+            <Text color={mainColor}>{MAIN_GLYPH[mainSt]} </Text>
             {[...running, ...finished].map(a => (
               <Text key={a.id} color={colorOf(a.type)}>
                 {STATUS_GLYPH[a.status]}{' '}
@@ -1298,6 +1424,31 @@ export const register: Register = (on, options) => {
           </Text>
         ) : (
           <Box flexDirection="column" marginTop={1}>
+            <Box flexDirection="column" marginBottom={1}>
+              <Box flexDirection="row" gap={1}>
+                <Text color={ACCENT}>⚓</Text>
+                <Text bold>{s.main}</Text>
+                <Text color={mainColor}>{MAIN_GLYPH[mainSt]}</Text>
+              </Box>
+              {phase && (
+                <Text dimColor wrap="truncate-end">
+                  {'  '}
+                  {phase}
+                </Text>
+              )}
+              <Text wrap="truncate-end">
+                {'  '}
+                <Text dimColor>{s.ctx} </Text>
+                <Text color={TERM_LEVEL[mainCtx.level]} dimColor={mainCtx.level === 'ok'}>
+                  {ctxBar(Math.min(100, mainCtx.ratio * 100), meterW)}
+                </Text>
+                <Text dimColor>
+                  {' '}
+                  {mainCtx.value}
+                  {m.isTurn ? ` · ${fmtTime(at - m.turnStartedAt)}` : ''}
+                </Text>
+              </Text>
+            </Box>
             {isEmpty && <Text dimColor>{s.empty}</Text>}
             {running.length > 0 && (
               <Text dimColor>
