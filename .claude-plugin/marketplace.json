@@ -11,7 +11,7 @@
       "name": "crew-board",
       "source": "./",
       "description": "Mod: plan and subagent progress above the prompt, plus a crew panel.",
-      "version": "0.1.0"
+      "version": "0.2.0"
     }
   ]
 }
