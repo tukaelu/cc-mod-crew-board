@@ -11,7 +11,11 @@ const band = { hasSurvey: false, isWorking: false, maxRows: 4, bodyColumns: 100,
 const engine = (on: On) => {
   const clock = mock.clock(on)
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.toast', () => ({ value: undefined }))
+  const toasts: string[] = []
+  on('ui.toast', (_$, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
   let n = 0
   on('agent.spawn', (_$, e) => ({ model: e.model ?? 'claude-opus-5-5', agentId: `a${++n}` }))
   on('turn.complete', () => ({ text: '' }) as never)
@@ -21,7 +25,7 @@ const engine = (on: On) => {
     await held
     return { result: 'done' } as never
   })
-  return { release: () => release(), clock }
+  return { release: () => release(), clock, toasts }
 }
 
 const spawn = ($: Engine, description: string, model: string) =>
@@ -105,4 +109,51 @@ test('band: with no plan reported, a launched agent shows "N running"', async ($
   expect(await bandRow($)).toContain('1 running')
   release()
   await inFlight
+})
+
+test('band: with no plan reported, the band finishes itself when its last agent does', async ($, on) => {
+  const { release, toasts } = engine(on)
+  release()
+  await $.tool.call({ tool: 'Agent', subagent_type: 'Explore', description: 'x', prompt: 'p' } as never)
+  await spawn($, 'Scout', 'claude-opus-5-5')
+  expect(await bandRow($)).toContain('1 running')
+  await ($.turn.complete as (e: unknown) => Promise<unknown>)({ agentId: 'a1', reason: 'answer', answer: 'ok', usage: null })
+  const done = await bandRow($)
+  expect(done).toContain('Done')
+  expect(done).toContain('fill="#5fbf8f"')
+  expect(done).not.toContain('0 running')
+  // No plan was reported, so there is no plan to announce as complete.
+  expect(toasts).toEqual([])
+})
+
+test('panel: the Finished section folds away with the toggle beside its bar', async ($, on) => {
+  engine(on)
+  await spawn($, 'One', 'claude-opus-5-5')
+  await ($.turn.complete as (e: unknown) => Promise<unknown>)({ agentId: 'a1', reason: 'answer', answer: 'ok', usage: null })
+  const pane = { title: '', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } as const
+  const cards = async () => {
+    const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'Pane', requestId: 'crew-agents', props: pane })
+    const n = (await ui.findAll({ type: 'Svg' })).filter(el => String(el.props.alt).startsWith('One')).length
+    return { ui, n }
+  }
+  const before = await cards()
+  expect(before.n).toBe(1)
+  await before.ui.press({ key: 'done' })
+  await before.ui.unmount()
+  const after = await cards()
+  expect(after.n).toBe(0)
+  await after.ui.unmount()
+})
+
+test('panel: a main-session turn redraws the panel, so the chat cost stays current', async ($, on) => {
+  engine(on)
+  let usd = 1
+  on('session.usage', () => ({ value: { startedAt: 0, context: {}, rateLimits: [], cost: { usd } } }) as never)
+  const pane = { title: '', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } as const
+  const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'Pane', requestId: 'crew-agents', props: pane })
+  expect(await ui.find({ type: 'Text', text: /\$1\.00/ })).toBeDefined()
+  usd = 2.5
+  await ($.turn.complete as (e: unknown) => Promise<unknown>)({ reason: 'answer', answer: 'ok', usage: null })
+  expect(await ui.find({ type: 'Text', text: /\$2\.50/ })).toBeDefined()
+  await ui.unmount()
 })

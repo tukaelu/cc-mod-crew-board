@@ -141,8 +141,8 @@ test('step: a subagent reports on its own row only; the main session cannot', as
   expect(shown).toContain('Step 3 · writing')
   expect(shown.match(/^ +reading$/gm)?.length).toBe(1)
   expect(shown).not.toContain('3/3')
-  // The row of a1 has no steps: no step line, only its meters.
-  expect(shown).toMatch(/ctx ░+ 0%/)
+  // The rows have no steps and no request seen yet: no step line, and the context is not known.
+  expect(shown).toMatch(/ctx ░+ —/)
 })
 
 test('step: a working row lists the notes before the current one newest first; a done row oldest first', async ($, on) => {
@@ -245,4 +245,27 @@ test('autoOpen any: the first agent start opens the panel too, once', { options:
   await spawn($, 'One')
   await spawn($, 'Two')
   expect(opened).toEqual(['crew-agents'])
+})
+
+test('aborted: a stopped run is finished as stopped, with no ✗ and no toast', async ($, on) => {
+  const { toasts } = engine(on)
+  await spawn($, 'Halted')
+  await end($, 'a1', 'aborted')
+  const shown = await texts($)
+  expect(shown).toContain('Finished 1')
+  expect(shown).toContain('■')
+  expect(shown).toContain('Stopped')
+  expect(shown).not.toContain('✗')
+  expect(toasts).toEqual([])
+})
+
+test('context: a run whose requests were never seen shows ctx —, not 0%, and is never warned', async ($, on) => {
+  const { toasts } = engine(on)
+  await spawn($, 'Unseen')
+  await ($.turn.complete as (e: unknown) => Promise<unknown>)({ agentId: 'a1', reason: 'answer', answer: 'ok', usage: { model: 'claude-opus-5-5', input_tokens: 900_000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } })
+  const shown = await texts($)
+  expect(shown).toMatch(/ctx ░+ —/)
+  expect(shown).not.toMatch(/ctx ░+ 0%/)
+  expect(shown).toContain('900k') // the turn's tokens still count
+  expect(toasts).toEqual([])
 })

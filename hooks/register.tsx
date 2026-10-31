@@ -86,6 +86,9 @@ const STRINGS = {
     stepAt: (n: number) => `Step ${n}`,
     doneSteps: (n: number) => `Done · ${n} step${n === 1 ? '' : 's'}`,
     failedAt: (n: number) => `Failed at step ${n}`,
+    aborted: 'Stopped',
+    isAborted: 'stopped',
+    toggleDone: 'Fold the finished runs',
     guessedWindow: 'window unknown, computed against 1M tokens',
     failedToast: (d: string) => `Subagent failed: ${d}`,
     ctxToast: (d: string, ctx: string) => `${d}: ${ctx}`,
@@ -121,6 +124,9 @@ const STRINGS = {
     stepAt: (n: number) => `ステップ ${n}`,
     doneSteps: (n: number) => `完了 · ${n} ステップ`,
     failedAt: (n: number) => `ステップ ${n} で失敗`,
+    aborted: '中断',
+    isAborted: '中断',
+    toggleDone: '終了した行を折りたたむ',
     guessedWindow: 'ウィンドウ不明のため 100 万トークンで計算',
     failedToast: (d: string) => `サブエージェントが失敗しました: ${d}`,
     ctxToast: (d: string, ctx: string) => `${d}: ${ctx}`,
@@ -186,6 +192,7 @@ const merge = (prev: Flow | null, input: ProgressInput): Flow => {
     phase,
     isFinished: input.finished === true,
     tasks,
+    isAdHoc: undefined,
   }
 }
 
@@ -448,12 +455,14 @@ const PANE_CSS = `<style>
 const mascot = (x: number, y: number, scale: number, type: string, state: MascotState, isMoving = state === 'run', effort?: string): string =>
   `<g transform="translate(${x},${y}) scale(${scale})" shape-rendering="crispEdges">${mendako(costumeOf(type), state, colorOf(type), effort, isMoving)}</g>`
 
-const stateOf = (status: AgentRun['status']): MascotState => (status === 'running' ? 'run' : status === 'done' ? 'done' : 'fail')
+// A stopped run keeps its working face (open eyes, prop in hand) but holds still.
+const stateOf = (status: AgentRun['status']): MascotState => (status === 'running' || status === 'aborted' ? 'run' : status === 'done' ? 'done' : 'fail')
 
 const statusMark = (x: number, y: number, status: string, color: string): string => {
   if (status === 'running') return `<circle class="live" cx="${x}" cy="${y}" r="3.5" fill="${color}"/>`
   if (status === 'done') return `<path d="M${x - 5} ${y}l3.5 3.5 6.5-7" fill="none" stroke="#3B9C5F" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`
   if (status === 'failed') return `<path d="M${x - 4} ${y - 4}l8 8M${x + 4} ${y - 4}l-8 8" stroke="#D0453F" stroke-width="1.8" stroke-linecap="round"/>`
+  if (status === 'aborted') return `<rect x="${x - 4}" y="${y - 4}" width="8" height="8" rx="1.5" fill="#9a9a96"/>`
   return `<circle cx="${x}" cy="${y}" r="5" fill="none" stroke="#9a9a96" stroke-width="1.4"/><path d="M${x} ${y - 2.5}v2.8l1.8 1.2" fill="none" stroke="#9a9a96" stroke-width="1.4" stroke-linecap="round"/>`
 }
 
@@ -490,34 +499,37 @@ const progressOf = (a: AgentRun): number | null => {
   return null
 }
 
-// Context fill against the model's window; `isGuessed` when the window table lacks the model.
-const ctxOf = (a: AgentRun): { percent: number; isGuessed: boolean } => {
+// Context fill against the model's window; `isGuessed` when the window table lacks the
+// model. null until a request's usage was seen: a turn's sum is not a context size.
+const ctxOf = (a: AgentRun): { percent: number | null; isGuessed: boolean } => {
   const w = windowOf(a.model)
+  if (a.steps === 0) return { percent: null, isGuessed: w.isGuessed }
   return { percent: Math.min(100, Math.round((a.contextTokens / w.max) * 100)), isGuessed: w.isGuessed }
 }
 
 const fmtCtx = (a: AgentRun): string => {
   const c = ctxOf(a)
-  return `${tr().ctx} ${c.percent}%${c.isGuessed ? '?' : ''}`
+  return c.percent === null ? `${tr().ctx} —` : `${tr().ctx} ${c.percent}%${c.isGuessed ? '?' : ''}`
 }
 
 // What the alt text adds for the figure a sighted reader sees marked `?`.
 const runAlt = (a: AgentRun, state: string): string => {
   const s = tr()
   const notes = [`${a.taskNo ? `#${a.taskNo} ` : ''}${a.description || a.type}: ${runModel(a)}, ${state}`, fmtCtx(a), `${fmtTokens(a.tokens)} ${s.tokensWord}`]
-  if (ctxOf(a).isGuessed) notes.push(s.guessedWindow)
+  if (ctxOf(a).isGuessed && ctxOf(a).percent !== null) notes.push(s.guessedWindow)
   return notes.join(', ')
 }
 
 // A row's step line: where it stands, colored by how the run is going, and the
 // notes under it. Nothing when the run never reported steps (and did not fail).
-const STEP_COLOR = { running: '#D97757', done: '#3B9C5F', failed: '#D0453F' }
+const STEP_COLOR = { running: '#D97757', done: '#3B9C5F', failed: '#D0453F', aborted: '#9A9A96' }
 
 const stepLines = (a: AgentRun): { head: string; notes: string[] } | null => {
   const s = tr()
   const notes = a.stepNotes ?? []
   const at = Math.min(a.stepTotal || Infinity, (a.stepDone ?? 0) + 1)
   if (a.status === 'failed') return { head: a.stepTotal ? s.failedAt(at) : s.failed, notes: notes.slice(-2) }
+  if (a.status === 'aborted') return { head: s.aborted, notes: notes.slice(-2) }
   if (!a.stepTotal) return null
   // Done: the last notes, oldest first. Working: the current one in the head, and
   // under it the two before it, newest first.
@@ -556,7 +568,10 @@ const metersOf = (a: AgentRun, l: Limits) => {
   const ctx = ctxOf(a)
   const hasBudget = l.tokenBudget > 0
   return {
-    ctx: { ratio: ctx.percent / 100, value: `${ctx.percent}%${ctx.isGuessed ? '?' : ''}`, level: levelOf(ctx.percent / l.warnPercent) },
+    ctx:
+      ctx.percent === null
+        ? { ratio: 0, value: '—', level: 'ok' as Level }
+        : { ratio: ctx.percent / 100, value: `${ctx.percent}%${ctx.isGuessed ? '?' : ''}`, level: levelOf(ctx.percent / l.warnPercent) },
     tokens: {
       ratio: hasBudget ? a.tokens / l.tokenBudget : l.maxTokens ? a.tokens / l.maxTokens : 0,
       value: hasBudget ? `${fmtTokens(a.tokens)} / ${fmtTokens(l.tokenBudget)}` : fmtTokens(a.tokens),
@@ -624,9 +639,9 @@ ${statusMark(W - PAD - 6, PAD + 10, 'planned', color)}
 
 const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: Totals): string => {
   const icons = [
-    ...list.filter(a => a.status === 'running').map(a => ({ type: a.type, state: stateOf(a.status) })),
-    ...list.filter(a => a.status !== 'running').map(a => ({ type: a.type, state: stateOf(a.status) })),
-    ...planned.map(p => ({ type: p.type, state: 'wait' as const })),
+    ...list.filter(a => a.status === 'running').map(a => ({ type: a.type, state: stateOf(a.status), isMoving: true })),
+    ...list.filter(a => a.status !== 'running').map(a => ({ type: a.type, state: stateOf(a.status), isMoving: false })),
+    ...planned.map(p => ({ type: p.type, state: 'wait' as const, isMoving: false })),
   ]
   const fit = Math.max(1, Math.floor((W - 150) / 36))
   const shown = icons.slice(0, fit)
@@ -634,8 +649,8 @@ const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: Totals):
   const body = shown
     .map(
       (ic, i) =>
-        mascot(i * 36, 4, 1.5, ic.type, ic.state) +
-        (ic.state === 'run' ? `<circle class="live" cx="${i * 36 + 32}" cy="4" r="3" fill="${colorOf(ic.type)}"/>` : ''),
+        mascot(i * 36, 4, 1.5, ic.type, ic.state, ic.isMoving) +
+        (ic.isMoving ? `<circle class="live" cx="${i * 36 + 32}" cy="4" r="3" fill="${colorOf(ic.type)}"/>` : ''),
     )
     .join('')
   const x = shown.length * 36 + (more ? 4 : 0)
@@ -650,6 +665,8 @@ const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: Totals):
 // Section heads on the desktop: a colored bar per section.
 const SECTION_COLOR = { running: '#1F9D55', finished: '#E0A419', planned: '#9A9A96' }
 const SECTION_H = 48
+// Room beside the Finished bar for its fold toggle.
+const FOLD_W = 32
 
 const sectionSvg = (W: number, color: string, label: string): string =>
   svg(
@@ -667,7 +684,7 @@ const ctxBar = (pct: number, width: number): string => {
   return '█'.repeat(filled) + '░'.repeat(Math.max(0, width - filled))
 }
 
-const STATUS_GLYPH: Record<string, string> = { running: '●', done: '✓', failed: '✗', planned: '◷' }
+const STATUS_GLYPH: Record<string, string> = { running: '●', done: '✓', failed: '✗', aborted: '■', planned: '◷' }
 
 // Opens the crew pane, or closes it when it is up; true when it ends up open.
 async function togglePane($: EngineInterface): Promise<boolean> {
@@ -767,6 +784,15 @@ async function shouldBrief($: EngineInterface, type: string, prompt: string, cwd
   if (type.includes(':') && !typeList(options.stepInclude).includes(type)) return false
   const fm = await agentFile($, type, cwd)
   return !fm || fileAllowsStep(fm)
+}
+
+// A band started by Agent launches with no plan reported ends when its last run
+// does: "0 running" would otherwise stay up until dismissed.
+async function settleAdHoc($: EngineInterface): Promise<void> {
+  const f = await read($, flow)
+  if (!f?.isAdHoc || f.isFinished || f.running > 0) return
+  if ((await read($, agents)).some(a => a.status === 'running')) return
+  await update($, flow, p => (p?.isAdHoc && !p.isFinished ? { ...p, isFinished: true } : p))
 }
 
 async function autoOpen($: EngineInterface, key: string): Promise<void> {
@@ -916,13 +942,14 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
     // With no plan reported, the first launch starts a blank one: the band shows "N running".
     await update($, flow, prev => {
-      const base = prev && !prev.isFinished ? prev : blank()
+      const base = prev && !prev.isFinished ? prev : { ...blank(), isAdHoc: true }
       return { ...base, running: base.running + 1 }
     })
     try {
       return await next(e)
     } finally {
       await update($, flow, prev => (prev ? { ...prev, running: Math.max(0, prev.running - 1) } : prev))
+      await settleAdHoc($)
     }
   })
 
@@ -946,6 +973,8 @@ export const register: Register = (on, options) => {
       await update($, now, () => at)
       return started
     }
+    // A band with no plan that already settled opens again for the new run.
+    await update($, flow, p => (p?.isAdHoc && p.isFinished ? { ...p, isFinished: false } : p))
     const task = linkTask(await read($, flow), e.description)
     await update($, agents, list => {
       const round = 1 + list.filter(a => isSameTask(a, task.taskNo, task.description)).length
@@ -1005,7 +1034,7 @@ export const register: Register = (on, options) => {
     )
     // Once per run: the fill crossed contextWarnPercent (against the 1M guess too).
     const run = (await read($, agents)).find(a => a.agentId === agentId)
-    if (run && !run.isCtxWarned && ctxOf(run).percent > warnPercent) {
+    if (run && !run.isCtxWarned && (ctxOf(run).percent ?? 0) > warnPercent) {
       await update($, agents, list => list.map(a => (a.agentId === agentId ? { ...a, isCtxWarned: true } : a)))
       void $.ui.toast(tr().ctxToast(run.description || run.type, fmtCtx(run)))
     }
@@ -1017,7 +1046,7 @@ export const register: Register = (on, options) => {
     if (agentId) {
       const at = await $.clock.now()
       const wasRunning = (await read($, agents)).find(a => a.agentId === agentId && a.status === 'running')
-      if (wasRunning && e.reason !== 'answer') void $.ui.toast(tr().failedToast(wasRunning.description || wasRunning.type))
+      if (wasRunning && e.reason !== 'answer' && e.reason !== 'aborted') void $.ui.toast(tr().failedToast(wasRunning.description || wasRunning.type))
       await update($, agents, list =>
         list.map((a): AgentRun => {
           if (a.agentId !== agentId) return a
@@ -1025,7 +1054,7 @@ export const register: Register = (on, options) => {
           const fallback = a.steps === 0 && e.usage
           return {
             ...a,
-            status: e.reason === 'answer' ? 'done' : 'failed',
+            status: e.reason === 'answer' ? 'done' : e.reason === 'aborted' ? 'aborted' : 'failed',
             endedAt: at,
             ...(fallback && e.usage
               ? {
@@ -1040,8 +1069,11 @@ export const register: Register = (on, options) => {
           }
         }),
       )
-      await update($, now, () => at)
+      await settleAdHoc($)
     }
+    // Every turn redraws the panel, the main session's too: the chat's cost moved.
+    const at = await $.clock.now()
+    await update($, now, () => at)
     return next(e)
   })
 
@@ -1112,13 +1144,14 @@ export const register: Register = (on, options) => {
         )
       }
       const sections = [running.length, finished.length, planned.length].filter(n => n > 0).length
+      const shownDone = p.isDoneCollapsed ? [] : finished
       const limits: Limits = { warnPercent, tokenBudget, maxTokens: Math.max(0, ...list.map(a => a.tokens)) }
       const gridH =
         TITLE_H +
         TILES_H +
         (isEmpty ? LINE_H : 0) +
         sections * SECTION_H +
-        [...running, ...finished].reduce((h, a) => h + cardHeight(a) + CARD_GAP, 0) +
+        [...running, ...shownDone].reduce((h, a) => h + cardHeight(a) + CARD_GAP, 0) +
         planned.length * (PLANNED_H + CARD_GAP)
       return (
         <Box flexDirection="column" alignItems="center">
@@ -1135,12 +1168,22 @@ export const register: Register = (on, options) => {
             {running.map(a => (
               <Svg key={a.id} source={agentSvg(W, a, at, limits)} alt={runAlt(a, s.isRunning)} width={W} height={cardHeight(a) + CARD_GAP} />
             ))}
-            {finished.length > 0 && section('h-done', SECTION_COLOR.finished, `${s.finished} ${finished.length}`)}
-            {finished.map(a => (
+            {finished.length > 0 && (
+              <Box key="h-done" flexDirection="row" alignItems="center">
+                <Svg source={sectionSvg(W - FOLD_W, SECTION_COLOR.finished, `${s.finished} ${finished.length}`)} alt={`${s.finished} ${finished.length}`} width={W - FOLD_W} height={SECTION_H} />
+                <Button
+                  key="done"
+                  label={p.isDoneCollapsed ? '▸' : '▾'}
+                  plain
+                  onPress={() => update($, panel, prev => ({ ...prev, isDoneCollapsed: !prev.isDoneCollapsed }))}
+                />
+              </Box>
+            )}
+            {shownDone.map(a => (
               <Svg
                 key={a.id}
                 source={agentSvg(W, a, at, limits)}
-                alt={runAlt(a, a.status === 'failed' ? s.isFailed : s.isFinished)}
+                alt={runAlt(a, a.status === 'failed' ? s.isFailed : a.status === 'aborted' ? s.isAborted : s.isFinished)}
                 width={W}
                 height={cardHeight(a) + CARD_GAP}
               />
@@ -1172,7 +1215,7 @@ export const register: Register = (on, options) => {
             <Text bold wrap="truncate-end">
               {a.description || a.type}
             </Text>
-            <Text color={a.status === 'failed' ? 'red' : a.status === 'done' ? 'green' : color}>{STATUS_GLYPH[a.status]}</Text>
+            <Text color={a.status === 'failed' ? 'red' : a.status === 'done' ? 'green' : a.status === 'aborted' ? 'gray' : color}>{STATUS_GLYPH[a.status]}</Text>
           </Box>
           <Text dimColor wrap="truncate-end">
             {'  '}

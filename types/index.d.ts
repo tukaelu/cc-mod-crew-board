@@ -13,9 +13,12 @@ export type Flow = {
   phase: string
   isFinished: boolean
   tasks: PlannedTask[]
+  /** Started by an Agent launch with no plan reported; it finishes itself when its runs end. */
+  isAdHoc?: boolean
 }
 
-export type AgentStatus = 'running' | 'done' | 'failed'
+/** `aborted`: stopped before it answered (by the person, say), not a failure. */
+export type AgentStatus = 'running' | 'done' | 'failed' | 'aborted'
 
 export type AgentRun = {
   id: string
