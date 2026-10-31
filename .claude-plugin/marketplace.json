@@ -1,0 +1,17 @@
+{
+  "name": "cc-mod-crew-board",
+  "owner": {
+    "name": "Tsukasa Nishiyama"
+  },
+  "metadata": {
+    "description": "The crew-board Claude Code mod."
+  },
+  "plugins": [
+    {
+      "name": "crew-board",
+      "source": "./",
+      "description": "Mod: plan and subagent progress above the prompt, plus a crew panel.",
+      "version": "0.1.0"
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "name": "crew-board",
+  "version": "0.1.0",
+  "description": "Plan and subagent progress above the prompt, plus a crew panel (/crew): running, finished and planned subagents with model, steps, context, tokens and time.",
+  "author": {
+    "name": "Tsukasa Nishiyama"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "showMascot": {
+      "type": "boolean",
+      "title": "Show the mendako",
+      "description": "Draw the mendako on the band and the panel's cards; off, their room goes to the text",
+      "default": true
+    },
+    "language": {
+      "type": "string",
+      "title": "Language",
+      "description": "auto follows Claude Code's language setting, then the system locale, then English",
+      "default": "auto",
+      "options": [
+        "auto",
+        "en",
+        "ja"
+      ]
+    },
+    "autoOpen": {
+      "type": "string",
+      "title": "Open the crew panel",
+      "description": "plan: when a plan is reported; any: also when any subagent starts",
+      "default": "plan",
+      "options": [
+        "plan",
+        "any"
+      ]
+    },
+    "contextWarnPercent": {
+      "type": "number",
+      "title": "Context warning (%)",
+      "description": "Show a toast once per subagent when its context fill goes over this percentage",
+      "default": 80
+    },
+    "tokenBudget": {
+      "type": "number",
+      "title": "Token budget per subagent",
+      "description": "Tokens one subagent may use before its token bar turns yellow (75%) and red (100%); 0 compares runs with each other and never warns",
+      "default": 0
+    },
+    "stepInclude": {
+      "type": "string",
+      "title": "Ask these plugin agents for steps",
+      "description": "Comma-separated agent types with a \":\" (plugin agents) whose brief still gets the step request",
+      "default": ""
+    },
+    "stepExclude": {
+      "type": "string",
+      "title": "Never ask these agents for steps",
+      "description": "Comma-separated agent types whose brief never gets the step request",
+      "default": "Explore"
+    }
+  },
+  "license": "MIT"
+}
