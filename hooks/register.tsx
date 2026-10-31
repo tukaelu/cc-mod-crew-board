@@ -665,8 +665,6 @@ const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: Totals):
 // Section heads on the desktop: a colored bar per section.
 const SECTION_COLOR = { running: '#1F9D55', finished: '#E0A419', planned: '#9A9A96' }
 const SECTION_H = 48
-// Room beside the Finished bar for its fold toggle.
-const FOLD_W = 32
 
 const sectionSvg = (W: number, color: string, label: string): string =>
   svg(
@@ -1169,14 +1167,19 @@ export const register: Register = (on, options) => {
               <Svg key={a.id} source={agentSvg(W, a, at, limits)} alt={runAlt(a, s.isRunning)} width={W} height={cardHeight(a) + CARD_GAP} />
             ))}
             {finished.length > 0 && (
-              <Box key="h-done" flexDirection="row" alignItems="center">
-                <Svg source={sectionSvg(W - FOLD_W, SECTION_COLOR.finished, `${s.finished} ${finished.length}`)} alt={`${s.finished} ${finished.length}`} width={W - FOLD_W} height={SECTION_H} />
-                <Button
-                  key="done"
-                  label={p.isDoneCollapsed ? '▸' : '▾'}
-                  plain
-                  onPress={() => update($, panel, prev => ({ ...prev, isDoneCollapsed: !prev.isDoneCollapsed }))}
-                />
+              // The fold toggle sits inside the bar on its right: a Button laid over the
+              // drawing, centered on the bar's row (10..38 of the 48px drawing).
+              <Box key="h-done" position="relative">
+                <Svg source={sectionSvg(W, SECTION_COLOR.finished, `${s.finished} ${finished.length}`)} alt={`${s.finished} ${finished.length}`} width={W} height={SECTION_H} />
+                {/* Box offsets count character cells: one cell in from the bar's right end. */}
+                <Box position="absolute" top={0} bottom={0} right={1} flexDirection="row" alignItems="center">
+                  <Button
+                    key="done"
+                    label={p.isDoneCollapsed ? '▸' : '▾'}
+                    plain
+                    onPress={() => update($, panel, prev => ({ ...prev, isDoneCollapsed: !prev.isDoneCollapsed }))}
+                  />
+                </Box>
               </Box>
             )}
             {shownDone.map(a => (
