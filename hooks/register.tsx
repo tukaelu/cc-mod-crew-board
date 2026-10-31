@@ -19,9 +19,13 @@ const STEP_TOOL = 'mcp__crew-board__step'
 // Added to the end of a subagent's brief. A request worded as a condition ("if the
 // step tool appears among your tools") is skipped even with the tool listed, so the
 // request itself is unconditional; the last sentence covers an agent that lacks it.
+// It is set off from the brief and says it is not part of the task: a brief that
+// asks to summarize or translate its own text would otherwise take it in too.
 const STEP_BRIEF = `
 
-Progress reporting: before any other work, call \`${STEP_TOOL}\` with \`total\` (your plan in 3-8 steps) and \`done: 0\`; call it again with \`done\` and a few-word \`note\` as each step finishes. It only draws a progress bar. If you cannot find this tool, skip this silently.`
+---
+[A note from crew-board, the panel that shows your progress. It is not part of the task above: do not include it in your answer.]
+Before any other work, call \`${STEP_TOOL}\` with \`total\` (your plan in 3-8 steps) and \`done: 0\`; call it again with \`done\` and a few-word \`note\` as each step finishes. It only draws a progress bar. If you cannot find this tool, skip this silently.`
 const PANE = 'crew-agents'
 // The tools' schemas are advice to the model, not a check: what a call may ask
 // the band and the panel to draw is bounded here.
@@ -199,19 +203,15 @@ const withLive = (f: Flow, list: AgentRun[]): Flow => ({ ...f, running: Math.max
 
 const ratio = (f: Flow): number => (f.isFinished ? 1 : f.total ? f.done / f.total : 0)
 
-// Deterministic noise so the dither does not shimmer between redraws.
-const noise = (x: number, y: number): number => {
-  const s = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453
-  return s - Math.floor(s)
-}
-
 // The whole row is one SVG: the desktop wraps sibling elements onto new lines,
-// so title, bar, percent and the mascot live in one drawing; only the count and
-// the dismiss are Buttons beside it.
-const H = 22
-const BAR_H = 16
-const MASCOT_W = 22
-const CELL = 3
+// so title, bar, label, percent and the mascot live in one drawing; only the
+// count and the dismiss are Buttons beside it.
+const H = 28
+const BAR_H = 8
+// The band's mendako has no costume: its marks fill cells 0-15 × 3-13 of the
+// grid, drawn two pixels a cell.
+const MASCOT_W = 30
+const MASCOT_SCALE = 2
 const FONT = "-apple-system,BlinkMacSystemFont,'SF Pro Text','Hiragino Sans','Segoe UI',sans-serif"
 
 const xml = (s: string): string =>
@@ -241,69 +241,45 @@ const fitText = (s: string, size: number, maxW: number): string => {
 }
 
 const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
-  // The title takes what it needs, up to 40% of the row; the bar takes the rest.
-  const title = fitText(f.title, 13, Math.max(60, W * 0.4))
-  const BAR_X = Math.round(16 + textWidth(title, 13) + 12)
-  const BAR_W = Math.max(60, W - BAR_X - 46 - MASCOT_W)
   const color = f.isFinished ? DONE : ACCENT
+  const text = fitText(label(f), 12, Math.max(60, W / 4))
+  const percent = `${Math.round(ratio(f) * 100)}%`
+  // Right to left: mascot, percent, label; the title takes what it needs up to a
+  // third of the row, and the bar the rest.
+  const pctW = 46
+  const labelW = Math.ceil(textWidth(text, 12))
+  const pctX = W - MASCOT_W - 12
+  const labelX = pctX - pctW - labelW
+  // In a narrow band the title gives way first (down to nothing): the bar keeps 40px.
+  const titleRoom = Math.min(W / 3, labelX - 14 - 40 - 16 - 20)
+  const title = titleRoom >= 30 ? fitText(f.title, 13, titleRoom) : ''
+  const BAR_X = Math.round(title ? 20 + textWidth(title, 13) + 16 : 20)
+  const BAR_W = Math.max(0, labelX - 14 - BAR_X)
   const y0 = (H - BAR_H) / 2
   const fillW = Math.round(BAR_W * ratio(f))
+  // Handed to subagents, not yet done: the same color, faint, past the fill.
   const runW = f.total ? Math.round((BAR_W * Math.min(f.total, f.done + f.running)) / f.total) : 0
-  const dots: string[] = []
-
-  // Dithered fill: sparse at the start, dense toward the head.
-  const cols = Math.floor(fillW / CELL)
-  const rows = Math.floor(BAR_H / CELL)
-  for (let c = 0; c < cols; c++) {
-    const density = 0.35 + 0.6 * Math.pow(c / Math.max(1, cols), 1.2)
-    for (let r = 0; r < rows; r++) {
-      if (noise(c, r) < density) dots.push(`<rect class="t${Math.floor(noise(r, c) * 4)}" x="${c * CELL + 1}" y="${r * CELL + 1}" width="2" height="2"/>`)
-    }
-  }
-  // Handed to subagents, not yet done: a faint second layer.
-  const faint: string[] = []
-  for (let c = cols; c < Math.floor(runW / CELL); c++) {
-    for (let r = 0; r < rows; r++) {
-      if (noise(c + 7, r + 3) < 0.2) faint.push(`<rect class="t${Math.floor(noise(r + 5, c) * 4)}" x="${c * CELL + 1}" y="${r * CELL + 1}" width="1.7" height="1.7"/>`)
-    }
-  }
-
-  const ticks: string[] = []
-  for (let i = 1; i < f.total; i++) {
-    const x = Math.round((BAR_W * i) / f.total)
-    if (x > fillW + 4) ticks.push(`<rect x="${x}" y="${BAR_H / 2 - 4}" width="1.5" height="8" rx="0.75"/>`)
-  }
-
-  const text = fitText(label(f), 11, BAR_W - 18)
-  const pillW = Math.min(BAR_W, Math.round(18 + textWidth(text, 11)))
-  const pillX = Math.max(0, Math.min(BAR_W - pillW, fillW - pillW))
-  const percent = `${Math.round(ratio(f) * 100)}%`
-
+  // A tick between planned tasks: a gap in the fill, a mark on the track.
+  const ticks = Array.from({ length: Math.max(0, f.total - 1) }, (_, i) => {
+    const x = Math.round((BAR_W * (i + 1)) / f.total)
+    return `<rect class="${x <= fillW ? 'k' : 'tk'}" x="${x - 1}" y="0" width="2" height="${BAR_H}"/>`
+  })
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
 <style>
-.t{fill:#1f1f1f}.m{fill:#8a8a8a}.k{fill:#e4e4e2}.tk{fill:#b4b4b0}
-@media (prefers-color-scheme: dark){.t{fill:#ececec}.m{fill:#9a9a9a}.k{fill:#2c2c2c}.tk{fill:#5a5a5a}}
-/* Pixels twinkle in four out-of-phase groups; a finished bar settles to a slow glow. */
-.t0,.t1,.t2,.t3{animation:tw ${f.isFinished ? 3.2 : 2.2}s ease-in-out infinite}
-.t1{animation-duration:${f.isFinished ? 3.8 : 2.8}s;animation-delay:-.7s}.t2{animation-duration:${f.isFinished ? 4.4 : 1.9}s;animation-delay:-1.3s}.t3{animation-duration:${f.isFinished ? 3.5 : 3.3}s;animation-delay:-.4s}
-@keyframes tw{0%,100%{opacity:1}50%{opacity:${f.isFinished ? 0.8 : 0.3}}}
-@media (prefers-reduced-motion: reduce){.t0,.t1,.t2,.t3{animation:none}}
+.t{fill:#1f1f1f}.m{fill:#8a8a8a}.k{fill:#e4e4e2}.tk{fill:#c4c4c0}
+@media (prefers-color-scheme: dark){.t{fill:#ececec}.m{fill:#9a9a9a}.k{fill:#2c2c2c}.tk{fill:#4a4a4a}}
 </style>
-<defs><clipPath id="c"><rect x="0" y="0" width="${BAR_W}" height="${BAR_H}" rx="${BAR_H / 2}"/></clipPath></defs>
-<circle cx="5" cy="${H / 2}" r="4" fill="${color}"/>
-<text class="t" x="16" y="${H / 2 + 4.5}" font-family="${FONT}" font-size="13" font-weight="500">${xml(title)}</text>
+<circle cx="7" cy="${H / 2}" r="4" fill="${color}"/>
+<text class="t" x="20" y="${H / 2 + 4.5}" font-family="${FONT}" font-size="13" font-weight="600">${xml(title)}</text>
 <g transform="translate(${BAR_X},${y0})">
 <rect class="k" width="${BAR_W}" height="${BAR_H}" rx="${BAR_H / 2}"/>
-<g clip-path="url(#c)">
-<g fill="${color}">${dots.join('')}</g>
-<g fill="${color}" opacity="0.45">${faint.join('')}</g>
-<g class="tk">${ticks.join('')}</g>
+<rect class="run" x="${fillW}" width="${Math.max(0, runW - fillW)}" height="${BAR_H}" fill="${color}" opacity="0.35"/>
+<rect class="fill" width="${fillW}" height="${BAR_H}" rx="${BAR_H / 2}" fill="${color}"/>
+<g class="ticks">${ticks.join('')}</g>
 </g>
-<rect x="${pillX}" width="${pillW}" height="${BAR_H}" rx="${BAR_H / 2}" fill="${color}"/>
-<text x="${pillX + pillW / 2}" y="${BAR_H / 2 + 4}" text-anchor="middle" font-family="${FONT}" font-size="11" font-weight="600" fill="#ffffff">${xml(text)}</text>
-</g>
-<text class="m" x="${W - MASCOT_W - 6}" y="${H / 2 + 4.5}" text-anchor="end" font-family="${FONT}" font-size="12.5" font-variant-numeric="tabular-nums">${percent}</text>
-${MASCOT_CSS}<g transform="translate(${W - MASCOT_W},${(H - 16) / 2})" shape-rendering="crispEdges">${mendako('none', f.isFinished ? 'done' : 'run', color, undefined, !f.isFinished && isWorking)}</g>
+<text class="lb" x="${labelX}" y="${H / 2 + 4.5}" fill="${color}" font-family="${FONT}" font-size="12" font-weight="600">${xml(text)}</text>
+<text class="m" x="${pctX}" y="${H / 2 + 4.5}" text-anchor="end" font-family="${FONT}" font-size="12" font-variant-numeric="tabular-nums">${percent}</text>
+${MASCOT_CSS}<g transform="translate(${W - MASCOT_W},${(H - 10 * MASCOT_SCALE) / 2 - 3 * MASCOT_SCALE}) scale(${MASCOT_SCALE})" shape-rendering="crispEdges">${mendako('none', f.isFinished ? 'done' : 'run', color, undefined, !f.isFinished && isWorking)}</g>
 </svg>`
 }
 

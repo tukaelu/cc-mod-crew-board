@@ -52,6 +52,8 @@ for (const type of ['general-purpose', 'Plan', 'my-writer']) {
     const brief = await briefOf($, briefs, type)
     expect(brief).toContain(STEP)
     expect(brief).toContain(SKIP)
+    // Set off from the task, so a brief that summarizes its own text leaves it out.
+    expect(brief).toMatch(/Do the task\.\n\n---\n\[A note from crew-board[^\]]*not part of the task above[^\]]*\]/)
   })
 }
 

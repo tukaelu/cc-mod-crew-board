@@ -55,21 +55,22 @@ test('language auto: English when nothing says Japanese', async ($, on) => {
   expect(await words($)).toEqual(EN)
 })
 
-// The pill is sized from the label's width with CJK at 1em; at the Latin 0.56em a
-// Japanese label would spill out of its pill.
+// The label's slot is sized from its width with CJK at 1em; at the Latin 0.56em a
+// Japanese label would run into the percent beside it.
 for (const columns of [100, 30]) {
-  test(`language ja: the label fits its pill and the pill fits the bar at ${columns} columns`, { options: { language: 'ja' } }, async ($, on) => {
+  test(`language ja: the label sits between the bar and the percent at ${columns} columns`, { options: { language: 'ja' } }, async ($, on) => {
     await session($, on, {}, 'ja_JP.UTF-8')
     await $.tool.call({ tool: PROGRESS, title: '日本語のとても長い計画のタイトル', phase: '実装中', total: 3, done: 1 } as never)
     const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: { ...band, bodyColumns: columns } })
     const row = String((await ui.find({ type: 'Svg' }))?.props.source)
+    const barX = Number(/<g transform="translate\(([\d.]+),/.exec(row)?.[1])
     const barW = Number(/<rect class="k" width="([\d.]+)"/.exec(row)?.[1])
-    const [, pillX, pillW] = /<rect x="([\d.]+)" width="([\d.]+)" height="16" rx="8"/.exec(row) ?? []
-    const label = />([^<]*)<\/text>\n<\/g>/.exec(row)?.[1] ?? ''
-    // 11px text: each CJK character takes at least 11px, plus the pill's 18px of padding.
+    const [, labelX, label = ''] = /<text class="lb" x="([\d.]+)"[^>]*>([^<]*)<\/text>/.exec(row) ?? []
+    const pctX = Number(/<text class="m" x="([\d.]+)"/.exec(row)?.[1])
+    // 12px text: each CJK character takes at least 12px; the percent, right-aligned at pctX, needs about 30px.
     const cjk = [...label].filter(ch => /[　-鿿]/.test(ch)).length
     expect(cjk).toBeGreaterThan(0)
-    expect(Number(pillW)).toBeGreaterThanOrEqual(18 + cjk * 11)
-    expect(Number(pillX) + Number(pillW)).toBeLessThanOrEqual(barW)
+    expect(barX + barW).toBeLessThanOrEqual(Number(labelX))
+    expect(Number(labelX) + cjk * 12).toBeLessThanOrEqual(pctX - 30)
   })
 }

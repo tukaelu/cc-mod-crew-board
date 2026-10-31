@@ -41,30 +41,33 @@ test('band: launched tasks draw a faint layer past the done ones, with a tick pe
   const { release, clock } = engine(on)
   await $.tool.call({ tool: PROGRESS, title: 'Ship it', total: 4, done: 1 } as never)
   const before = await bandRow($)
-  const faint = (row: string | null) => /opacity="0\.45">(.*?)<\/g>/.exec(row ?? '')?.[1] ?? ''
-  expect(faint(before)).toBe('')
+  // The faint layer's width past the fill: 0 when nothing is launched.
+  const faint = (row: string | null) => Number(/class="run" x="[\d.]+" width="([\d.]+)"/.exec(row ?? '')?.[1] ?? 0)
+  expect(faint(before)).toBe(0)
   const inFlight = $.tool.call({ tool: 'Agent', subagent_type: 'general-purpose', description: 'x', prompt: 'p' } as never)
   await clock.settle()
   const during = await bandRow($)
-  expect(faint(during)).toContain('<rect')
-  // Ticks at 2/4 and 3/4 (1/4 is under the fill).
-  expect(/<g class="tk">(.*?)<\/g>/.exec(during ?? '')?.[1]?.match(/<rect/g)?.length).toBe(2)
+  expect(faint(during)).toBeGreaterThan(0)
+  // A tick per gap between the 4 tasks: 1/4 is a gap in the fill, 2/4 and 3/4 marks on the track.
+  const ticks = /<g class="ticks">(.*?)<\/g>/.exec(during ?? '')?.[1] ?? ''
+  expect(ticks.match(/class="k"/g)?.length).toBe(1)
+  expect(ticks.match(/class="tk"/g)?.length).toBe(2)
   release()
   await inFlight
-  expect(faint(await bandRow($))).toBe('')
+  expect(faint(await bandRow($))).toBe(0)
 })
 
-test('band: a finished plan turns the bar green and slows the twinkle', async ($, on) => {
+test('band: a finished plan turns the bar green', async ($, on) => {
   engine(on)
   await $.tool.call({ tool: PROGRESS, title: 'Ship it', total: 2, done: 1 } as never)
   const working = await bandRow($)
   expect(working).toContain('fill="#8f8cf4"')
-  expect(working).toContain('animation:tw 2.2s')
   await $.tool.call({ tool: PROGRESS, done: 2, finished: true } as never)
   const done = await bandRow($)
   expect(done).toContain('fill="#5fbf8f"')
   expect(done).not.toContain('fill="#8f8cf4"')
-  expect(done).toContain('animation:tw 3.2s')
+  // A solid bar: no twinkling dots.
+  expect(done).not.toContain('animation:tw')
 })
 
 test('band: nothing is drawn while Claude Code shows a survey', async ($, on) => {
@@ -80,10 +83,10 @@ test('band: a background agent counts as launched after its Agent call returns',
   await $.tool.call({ tool: PROGRESS, title: 'Ship it', total: 4, done: 1 } as never)
   await $.tool.call({ tool: 'Agent', subagent_type: 'general-purpose', description: 'x', prompt: 'p' } as never)
   await spawn($, 'Background', 'claude-opus-5-5')
-  const faint = /opacity="0\.45">(.*?)<\/g>/.exec((await bandRow($)) ?? '')?.[1] ?? ''
-  expect(faint).toContain('<rect')
+  const faint = (row: string | null) => Number(/class="run" x="[\d.]+" width="([\d.]+)"/.exec(row ?? '')?.[1] ?? 0)
+  expect(faint(await bandRow($))).toBeGreaterThan(0)
   await ($.turn.complete as (e: unknown) => Promise<unknown>)({ agentId: 'a1', reason: 'answer', answer: 'ok', usage: null })
-  expect(/opacity="0\.45">(.*?)<\/g>/.exec((await bandRow($)) ?? '')?.[1]).toBe('')
+  expect(faint(await bandRow($))).toBe(0)
 })
 
 test('band: with no plan reported, a background agent shows "1 running"', async ($, on) => {
