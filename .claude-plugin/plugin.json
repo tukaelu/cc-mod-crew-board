@@ -7,6 +7,12 @@
   },
   "types": "./types/index.d.ts",
   "userConfig": {
+    "showMascot": {
+      "type": "boolean",
+      "title": "Show the mendako",
+      "description": "Draw the mendako on the band and the panel's cards; off, their room goes to the text",
+      "default": true
+    },
     "language": {
       "type": "string",
       "title": "Language",

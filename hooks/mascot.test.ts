@@ -117,3 +117,41 @@ test('mascot: planned tasks wait, with no seaweed', async ($, on) => {
   expect(s).toContain('fill="#6A4FB0"') // a reviewer waits in the wizard's hat
   expect(s).not.toContain('class="kelp')
 })
+
+// showMascot off: no mendako anywhere, and the text takes its room.
+const band = { hasSurvey: false, isWorking: true, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 }, view: {} }
+
+for (const isShown of [true, false]) {
+  test(`showMascot ${isShown}: the cards and the band ${isShown ? 'draw' : 'leave out'} the mendako`, { options: { showMascot: isShown } }, async ($, on) => {
+    engine(on)
+    await $.tool.call({ tool: 'mcp__crew-board__progress', title: 'P', tasks: [{ title: 'Later', subagent_type: 'code-reviewer' }] } as never)
+    await $.agent.spawn({ tool_use_id: 't1', prompt: 'p', description: 'Tester', subagentType: 'test-runner', provider: 'engine', parentModel: 'm', background: false, fork: false } as never)
+    const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'Pane', requestId: 'crew-agents', props: pane })
+    const svgs = (await ui.findAll({ type: 'Svg' })).map(el => ({ alt: String(el.props.alt), source: String(el.props.source) }))
+    await ui.unmount()
+    const card = svgs.find(s => s.alt.startsWith('Tester'))?.source ?? ''
+    const planned = svgs.find(s => s.alt.startsWith('1. Later'))?.source ?? ''
+    for (const s of [card, planned]) {
+      expect(s.includes('shape-rendering="crispEdges"')).toBe(isShown)
+      expect(/<text class="[ts]" x="(\d+)"/.exec(s)?.[1]).toBe(isShown ? '96' : '18')
+    }
+    const row = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: band })
+    const bandSvg = String((await row.find({ type: 'Svg' }))?.props.source)
+    await row.unmount()
+    expect(bandSvg.includes('shape-rendering="crispEdges"')).toBe(isShown)
+    // The percent ends 12px from the mendako, or from the band's right end.
+    const W = Number(/width="(\d+)"/.exec(bandSvg)?.[1])
+    expect(Number(/<text class="m" x="([\d.]+)"/.exec(bandSvg)?.[1])).toBe(W - (isShown ? 30 : 0) - 12)
+  })
+}
+
+test('showMascot false: the compact panel shows a status mark per run', { options: { showMascot: false } }, async ($, on) => {
+  engine(on)
+  await $.agent.spawn({ tool_use_id: 't1', prompt: 'p', description: 'Tester', subagentType: 'test-runner', provider: 'engine', parentModel: 'm', background: false, fork: false } as never)
+  const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'Pane', requestId: 'crew-agents', props: pane })
+  await ui.press({ key: 'compact' })
+  const s = (await ui.findAll({ type: 'Svg' })).map(el => String(el.props.source)).join('\n')
+  await ui.unmount()
+  expect(s).not.toContain('shape-rendering="crispEdges"')
+  expect(s).toContain('class="live"')
+})

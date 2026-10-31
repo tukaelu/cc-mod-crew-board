@@ -137,6 +137,8 @@ const STRINGS = {
 // Module scope is fine here: session.start sets it again on every (re)load.
 let lang: Lang = 'en'
 const tr = () => STRINGS[lang]
+// The showMascot setting: off, no mendako is drawn and its room goes to the text.
+let showMascot = true
 
 const langOf = (v: unknown): Lang => (typeof v === 'string' && /^(ja|japanese|日本語)/i.test(v.trim()) ? 'ja' : 'en')
 
@@ -255,7 +257,7 @@ const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
   // third of the row, and the bar the rest.
   const pctW = 46
   const labelW = Math.ceil(textWidth(text, 12))
-  const pctX = W - MASCOT_W - 12
+  const pctX = W - (showMascot ? MASCOT_W : 0) - 12
   const labelX = pctX - pctW - labelW
   // In a narrow band the title gives way first (down to nothing): the bar keeps 40px.
   const titleRoom = Math.min(W / 3, labelX - 14 - 40 - 16 - 20)
@@ -286,7 +288,7 @@ const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
 </g>
 <text class="lb" x="${labelX}" y="${H / 2 + 4.5}" fill="${color}" font-family="${FONT}" font-size="12" font-weight="600">${xml(text)}</text>
 <text class="m" x="${pctX}" y="${H / 2 + 4.5}" text-anchor="end" font-family="${FONT}" font-size="12" font-variant-numeric="tabular-nums">${percent}</text>
-${MASCOT_CSS}<g transform="translate(${W - MASCOT_W},${(H - 10 * MASCOT_SCALE) / 2 - 3 * MASCOT_SCALE}) scale(${MASCOT_SCALE})" shape-rendering="crispEdges">${mendako('none', f.isFinished ? 'done' : 'run', color, undefined, !f.isFinished && isWorking)}</g>
+${showMascot ? `${MASCOT_CSS}<g transform="translate(${W - MASCOT_W},${(H - 10 * MASCOT_SCALE) / 2 - 3 * MASCOT_SCALE}) scale(${MASCOT_SCALE})" shape-rendering="crispEdges">${mendako('none', f.isFinished ? 'done' : 'run', color, undefined, !f.isFinished && isWorking)}</g>` : ''}
 </svg>`
 }
 
@@ -453,7 +455,7 @@ const PANE_CSS = `<style>
 // The mendako on its 22×16 grid, `scale` pixels a cell, at (x, y), in its type's
 // costume and color. The band draws its own: no costume, the bar's color.
 const mascot = (x: number, y: number, scale: number, type: string, state: MascotState, isMoving = state === 'run', effort?: string): string =>
-  `<g transform="translate(${x},${y}) scale(${scale})" shape-rendering="crispEdges">${mendako(costumeOf(type), state, colorOf(type), effort, isMoving)}</g>`
+  !showMascot ? '' : `<g transform="translate(${x},${y}) scale(${scale})" shape-rendering="crispEdges">${mendako(costumeOf(type), state, colorOf(type), effort, isMoving)}</g>`
 
 // A stopped run keeps its working face (open eyes, prop in hand) but holds still.
 const stateOf = (status: AgentRun['status']): MascotState => (status === 'running' || status === 'aborted' ? 'run' : status === 'done' ? 'done' : 'fail')
@@ -468,7 +470,7 @@ const statusMark = (x: number, y: number, status: string, color: string): string
 
 // Each Svg is a document of its own, so a drawing with a mendako carries its CSS.
 const svg = (W: number, H: number, body: string, hasMascot = true): string =>
-  `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${PANE_CSS}${hasMascot ? MASCOT_CSS : ''}${body}</svg>`
+  `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${PANE_CSS}${hasMascot && showMascot ? MASCOT_CSS : ''}${body}</svg>`
 
 // The header's first line: the plan's name, or how many subagents there are. The
 // compact toggle is a Button beside it, so this drawing leaves room for it.
@@ -540,7 +542,7 @@ const stepLines = (a: AgentRun): { head: string; notes: string[] } | null => {
 
 // Card rows. The sprite draws three pixels per cell (66×48) in the card's left column.
 const PAD = 14
-const TEXT_X = 96
+const textX = (): number => (showMascot ? 96 : PAD + 4)
 const CARD_GAP = 10
 const LINE = 18
 const METER_GAP = 16
@@ -587,11 +589,12 @@ const meter = (x: number, y: number, w: number, label: string, value: string, ra
 <rect class="k" x="${x}" y="${y + 6}" width="${w}" height="5" rx="2.5"/><rect x="${x}" y="${y + 6}" width="${Math.round(w * Math.max(0, Math.min(1, ratio)))}" height="5" rx="2.5" fill="${fill}"/>`
 
 const agentSvg = (W: number, a: AgentRun, at: number, limits: Limits): string => {
+  const tx = textX()
   const s = tr()
   const color = colorOf(a.type)
   const m = metersOf(a, limits)
   const H = cardHeight(a)
-  const textW = W - TEXT_X - PAD
+  const textW = W - tx - PAD
   const time = fmtTime(elapsed(a, at))
   const steps = stepLines(a)
   const progress = progressOf(a)
@@ -599,9 +602,9 @@ const agentSvg = (W: number, a: AgentRun, at: number, limits: Limits): string =>
   const meterW = (textW - METER_GAP) / 2
   let y = 110
   const stepSvg = steps
-    ? `<path d="M${TEXT_X + 5} ${y - 9}a5 5 0 1 0 0.01 0z" fill="none" stroke="${stepColor}" stroke-width="1.4"/><path d="M${TEXT_X + 5} ${y - 9}a5 5 0 0 0 0 10z" fill="${stepColor}"/>
-<text x="${TEXT_X + 16}" y="${y}" fill="${stepColor}" font-family="${FONT}" font-size="12.5" font-weight="600">${xml(fitText(steps.head, 12.5, textW - 16))}</text>
-${steps.notes.map(n => `<text class="t" x="${TEXT_X + 16}" y="${(y += LINE)}" font-family="${FONT}" font-size="12">${xml(fitText(n, 12, textW - 16))}</text>`).join('')}`
+    ? `<path d="M${tx + 5} ${y - 9}a5 5 0 1 0 0.01 0z" fill="none" stroke="${stepColor}" stroke-width="1.4"/><path d="M${tx + 5} ${y - 9}a5 5 0 0 0 0 10z" fill="${stepColor}"/>
+<text x="${tx + 16}" y="${y}" fill="${stepColor}" font-family="${FONT}" font-size="12.5" font-weight="600">${xml(fitText(steps.head, 12.5, textW - 16))}</text>
+${steps.notes.map(n => `<text class="t" x="${tx + 16}" y="${(y += LINE)}" font-family="${FONT}" font-size="12">${xml(fitText(n, 12, textW - 16))}</text>`).join('')}`
     : ''
   const barY = H - PAD - 4
   return svg(
@@ -609,51 +612,55 @@ ${steps.notes.map(n => `<text class="t" x="${TEXT_X + 16}" y="${(y += LINE)}" fo
     H + CARD_GAP,
     `<rect class="card${a.status === 'running' ? '' : ' ln'}" x="0.75" y="0.75" width="${W - 1.5}" height="${H - 1.5}" rx="12"${a.status === 'running' ? ` stroke="${color}" stroke-width="1.5"` : ''}/>
 ${mascot(15, (H - 48) / 2, 3, a.type, stateOf(a.status), a.status === 'running', a.effort)}
-<text class="t" x="${TEXT_X}" y="${PAD + 16}" font-family="${FONT}" font-size="14" font-weight="600">${xml(fitText(a.description || a.type, 14, textW - 22))}</text>
+<text class="t" x="${tx}" y="${PAD + 16}" font-family="${FONT}" font-size="14" font-weight="600">${xml(fitText(a.description || a.type, 14, textW - 22))}</text>
 ${statusMark(W - PAD - 6, PAD + 10, a.status, color)}
-<text class="s" x="${TEXT_X}" y="${PAD + 36}" font-family="${FONT}" font-size="11">${xml(fitText(metaOf(a), 11, textW - textWidth(time, 11) - 12))}</text>
+<text class="s" x="${tx}" y="${PAD + 36}" font-family="${FONT}" font-size="11">${xml(fitText(metaOf(a), 11, textW - textWidth(time, 11) - 12))}</text>
 <text class="s" x="${W - PAD}" y="${PAD + 36}" text-anchor="end" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${time}</text>
-${meter(TEXT_X, 70, meterW, s.ctx, m.ctx.value, m.ctx.ratio, m.ctx.level === 'ok' ? '#8A8A86' : LEVEL_COLOR[m.ctx.level])}
-${meter(TEXT_X + meterW + METER_GAP, 70, meterW, s.tokensWord, m.tokens.value, m.tokens.ratio, m.tokens.level === 'ok' ? color : LEVEL_COLOR[m.tokens.level])}
+${meter(tx, 70, meterW, s.ctx, m.ctx.value, m.ctx.ratio, m.ctx.level === 'ok' ? '#8A8A86' : LEVEL_COLOR[m.ctx.level])}
+${meter(tx + meterW + METER_GAP, 70, meterW, s.tokensWord, m.tokens.value, m.tokens.ratio, m.tokens.level === 'ok' ? color : LEVEL_COLOR[m.tokens.level])}
 ${stepSvg}
-${progress === null ? '' : `<rect class="k" x="${TEXT_X}" y="${barY}" width="${textW}" height="4" rx="2"/><rect x="${TEXT_X}" y="${barY}" width="${Math.round(textW * progress)}" height="4" rx="2" fill="${color}"/>`}`,
+${progress === null ? '' : `<rect class="k" x="${tx}" y="${barY}" width="${textW}" height="4" rx="2"/><rect x="${tx}" y="${barY}" width="${Math.round(textW * progress)}" height="4" rx="2" fill="${color}"/>`}`,
   )
 }
 
 const PLANNED_H = 76
 
 const plannedSvg = (W: number, p: Planned): string => {
+  const tx = textX()
   const color = colorOf(p.type)
-  const textW = W - TEXT_X - PAD
+  const textW = W - tx - PAD
   const meta = [p.type, ...(p.after.length ? [`${tr().after} ${p.after.join(', ')}`] : [])].filter(Boolean).join(' · ')
   return svg(
     W,
     PLANNED_H + CARD_GAP,
     `<rect class="card ln" x="0.75" y="0.75" width="${W - 1.5}" height="${PLANNED_H - 1.5}" rx="12" stroke-dasharray="4 3"/>
 ${mascot(15, (PLANNED_H - 48) / 2, 3, p.type, 'wait')}
-<text class="s" x="${TEXT_X}" y="${PAD + 18}" font-family="${FONT}" font-size="14" font-weight="600">${xml(fitText(`${p.n}. ${p.title}`, 14, textW - 22))}</text>
+<text class="s" x="${tx}" y="${PAD + 18}" font-family="${FONT}" font-size="14" font-weight="600">${xml(fitText(`${p.n}. ${p.title}`, 14, textW - 22))}</text>
 ${statusMark(W - PAD - 6, PAD + 10, 'planned', color)}
-<text class="m" x="${TEXT_X}" y="${PAD + 38}" font-family="${FONT}" font-size="11">${xml(fitText(meta, 11, textW))}</text>`,
+<text class="m" x="${tx}" y="${PAD + 38}" font-family="${FONT}" font-size="11">${xml(fitText(meta, 11, textW))}</text>`,
   )
 }
 
 const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: Totals): string => {
   const icons = [
-    ...list.filter(a => a.status === 'running').map(a => ({ type: a.type, state: stateOf(a.status), isMoving: true })),
-    ...list.filter(a => a.status !== 'running').map(a => ({ type: a.type, state: stateOf(a.status), isMoving: false })),
-    ...planned.map(p => ({ type: p.type, state: 'wait' as const, isMoving: false })),
+    ...list.filter(a => a.status === 'running').map(a => ({ type: a.type, status: a.status as string, state: stateOf(a.status), isMoving: true })),
+    ...list.filter(a => a.status !== 'running').map(a => ({ type: a.type, status: a.status as string, state: stateOf(a.status), isMoving: false })),
+    ...planned.map(p => ({ type: p.type, status: 'planned', state: 'wait' as const, isMoving: false })),
   ]
-  const fit = Math.max(1, Math.floor((W - 150) / 36))
+  // With no mendako each run is its status mark alone, so more of them fit.
+  const step = showMascot ? 36 : 20
+  const fit = Math.max(1, Math.floor((W - 150) / step))
   const shown = icons.slice(0, fit)
   const more = icons.length - shown.length
   const body = shown
-    .map(
-      (ic, i) =>
-        mascot(i * 36, 4, 1.5, ic.type, ic.state, ic.isMoving) +
-        (ic.isMoving ? `<circle class="live" cx="${i * 36 + 32}" cy="4" r="3" fill="${colorOf(ic.type)}"/>` : ''),
+    .map((ic, i) =>
+      showMascot
+        ? mascot(i * step, 4, 1.5, ic.type, ic.state, ic.isMoving) +
+          (ic.isMoving ? `<circle class="live" cx="${i * step + 32}" cy="4" r="3" fill="${colorOf(ic.type)}"/>` : '')
+        : statusMark(i * step + 8, 16, ic.status, colorOf(ic.type)),
     )
     .join('')
-  const x = shown.length * 36 + (more ? 4 : 0)
+  const x = shown.length * step + (more ? 4 : 0)
   return svg(
     W,
     32,
@@ -807,6 +814,7 @@ const positive = (raw: unknown): number | undefined => {
 }
 
 export const register: Register = (on, options) => {
+  showMascot = options.showMascot !== false
   // An empty field reads as unset, not as 0%: the default stands.
   const warnPercent = positive(options.contextWarnPercent) ?? 80
   const tokenBudget = positive(options.tokenBudget) ?? 0
