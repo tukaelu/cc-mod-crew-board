@@ -8,7 +8,7 @@ A Claude Code mod that shows the plan and the subagents working on it: a progres
 ## Tools it adds
 
 - `mcp__crew-board__progress`: the main session reports the plan (title, tasks with `subagent_type` and `after`, a free-text phase, done count, `finished`). A call from a subagent is ignored.
-- `mcp__crew-board__step`: a subagent reports its own steps (`done`, `total`, `note`). A run that does not report shows its context fill in grey instead.
+- `mcp__crew-board__step`: a subagent reports its own steps (`done`, `total`, `note`). A run that does not report shows no step lines or progress bar; its context and token meters are there either way.
 
 The cost in the panel's header is the whole chat's, as Claude Code's own ledger counts it (the `/cost` total, main session included); `—` where the host keeps none. Rows carry no cost: the engine does not report one per subagent.
 
@@ -24,10 +24,10 @@ Each subagent's brief gets one request at its end to report steps with `mcp__cre
 
 ## Settings
 
-Set in `/config`: `showMascot` (default on; off, the band and the cards drop the mendako and give its room to the text), `language` (`auto`, `en`, `ja`), `autoOpen` (`plan`, `any`), `contextWarnPercent` (default 80), `tokenBudget` (tokens per subagent; 0, the default, turns token warnings off), `stepInclude` and `stepExclude` (comma-separated agent types).
+Set in `/config` (in a terminal) or in `~/.claude/settings.json` under `pluginConfigs`, for example `"pluginConfigs": { "crew-board": { "options": { "showMascot": false } } }`. The fields: `showMascot` (default on; off, the band and the cards drop the mendako and give its room to the text), `language` (`auto`, `en`, `ja`), `autoOpen` (`plan`, `any`), `contextWarnPercent` (default 80), `tokenBudget` (tokens per subagent; 0, the default, turns token warnings off), `stepInclude` and `stepExclude` (comma-separated agent types).
 
 Each card has a context meter and a token meter. A meter turns yellow past three quarters of its limit and red past it: the context's limit is `contextWarnPercent`, the tokens' is `tokenBudget`. With no budget the token meter compares each run with the one that used the most and never warns.
 
 ## License
 
-MIT. Portions derived from claude-kit by johnnyvizz (MIT License).
+MIT. Portions derived from [claude-kit](https://github.com/JohnnyVizz/claude-kit) by johnnyvizz (MIT License).
