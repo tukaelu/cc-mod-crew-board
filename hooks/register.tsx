@@ -933,6 +933,19 @@ export const register: Register = (on, options) => {
     if (started.deny !== undefined) return started
 
     const at = await $.clock.now()
+    // A resumed subagent goes on in its own row: tokens, steps, notes and round carry
+    // over, and its clock skips the time it sat finished.
+    const resumedId = e.resume?.agentId ?? started.agentId
+    const resumed = e.resume ? (await read($, agents)).find(a => a.agentId === resumedId) : undefined
+    if (resumed) {
+      await update($, agents, list =>
+        list.map((a): AgentRun =>
+          a.agentId !== resumedId ? a : { ...a, status: 'running', startedAt: a.startedAt + (a.endedAt ? at - a.endedAt : 0), endedAt: undefined },
+        ),
+      )
+      await update($, now, () => at)
+      return started
+    }
     const task = linkTask(await read($, flow), e.description)
     await update($, agents, list => {
       const round = 1 + list.filter(a => isSameTask(a, task.taskNo, task.description)).length

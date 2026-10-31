@@ -10,7 +10,7 @@ const pane = { title: '', isFocused: false, bodyColumns: 80, placement: 'dock', 
 // The engine beneath the plugin: spawns answer agent ids a1, a2, ... in order, and
 // every toast and pane opening is kept.
 const engine = (on: On) => {
-  mock.clock(on)
+  const clock = mock.clock(on)
   const toasts: string[] = []
   const opened: string[] = []
   let n = 0
@@ -23,7 +23,8 @@ const engine = (on: On) => {
     return { value: { isPlaced: true } }
   })
   on('ui.panes', () => ({ value: [] }))
-  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: `a${++n}` }))
+  // A resumed run keeps its id; a new one gets the next.
+  on('agent.spawn', (_$, e) => ({ model: 'claude-opus-5-5', agentId: e.resume?.agentId ?? `a${++n}` }))
   on('turn.complete', () => ({ text: '' }) as never)
   // What the next model request reports; `request` sets it.
   const next = { model: 'claude-opus-5-5', tokens: 0 }
@@ -31,7 +32,7 @@ const engine = (on: On) => {
     const usage = { model: next.model, input_tokens: next.tokens, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
     return { turnId: 'turn', index: 0, answer: '', toolUses: [], stopReason: 'end_turn', usage } as never
   })
-  return { toasts, opened, next }
+  return { toasts, opened, next, clock }
 }
 
 const spawn = ($: Engine, description: string, subagentType = 'general-purpose') =>
@@ -158,6 +159,27 @@ test('step: a working row lists the notes before the current one newest first; a
   expect(done).toContain('Done · 4 steps')
   expect(done.indexOf('draft')).toBeLessThan(done.indexOf('polish'))
   expect(done).not.toContain('outline')
+})
+
+test('resume: a resumed subagent goes on in its own row, keeping tokens, notes and round', async ($, on) => {
+  const { next, clock } = engine(on)
+  await spawn($, 'Writer')
+  await request($, next, 'a1', 50_000)
+  await $.tool.call({ tool: STEP, agentId: 'a1', done: 1, total: 3, note: 'outline' } as never)
+  await clock.advance(10_000)
+  await end($, 'a1', 'answer')
+  expect(await texts($)).toContain('Finished 1')
+  // Sits finished for a minute, then a message wakes it.
+  await clock.advance(60_000)
+  await $.agent.spawn({ tool_use_id: 't-resume', prompt: 'go on', description: 'Writer', subagentType: 'general-purpose', provider: 'engine', parentModel: 'm', background: true, fork: false, resume: { agentId: 'a1' } } as never)
+  const shown = await texts($)
+  expect(shown).toContain('Running 1')
+  expect(shown).not.toContain('Finished')
+  expect(shown).not.toContain('round 2')
+  expect(shown).toContain('50k tokens') // the header's subagent total keeps the earlier tokens
+  expect(shown).toContain('Step 2 · outline')
+  // The clock goes on from 0:10, not from the minute it sat finished.
+  expect(shown).toMatch(/· 0:10\b/)
 })
 
 test('failure: a run that ends other than with an answer is finished with ✗ and toasts once', async ($, on) => {
